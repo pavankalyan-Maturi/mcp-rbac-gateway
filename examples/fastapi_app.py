@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import tools as raw  # noqa: E402
 from langgraph_agent import ScriptedModel, build_graph  # noqa: E402
 
-from mcp_sentinel import (  # noqa: E402
+from mcp_rbac_gateway import (  # noqa: E402
     AuditLog,
     Sentinel,
     ToolBlockedError,
@@ -89,7 +89,7 @@ def create_app(
         config.audit.path = audit_path
     sentinel = Sentinel(config)
 
-    app = FastAPI(title="mcp-sentinel FastAPI example")
+    app = FastAPI(title="mcp-rbac-gateway FastAPI example")
     app.state.sentinel = sentinel
     app.include_router(create_approval_router(sentinel.broker))
 

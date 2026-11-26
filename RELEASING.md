@@ -1,9 +1,8 @@
 # Releasing
 
-The package is published to PyPI as **`mcp-rbac-gateway`**. The name `mcp-sentinel` and
-names PyPI treats as too similar to it, such as `mcpsentinel-gateway`, belong to other
-projects. The import name `mcp_sentinel` and the `mcp-sentinel`
-command are unchanged.
+The package is published to PyPI as **`mcp-rbac-gateway`**. Since 0.1.1 the import name
+(`mcp_rbac_gateway`) and the command (`mcp-rbac-gateway`) match it, and so does the GitHub repository
+(`pavankalyan-Maturi/mcp-rbac-gateway`).
 
 Publishing uses [trusted publishing](https://docs.pypi.org/trusted-publishers/): GitHub
 Actions proves who it is to PyPI with OIDC, so no API token is stored anywhere.
@@ -32,7 +31,7 @@ Do these once, as the repository owner.
    fill in:
    - PyPI project name: `mcp-rbac-gateway`
    - Owner: `pavankalyan-Maturi`
-   - Repository name: `mcp-sentinel`
+   - Repository name: `mcp-rbac-gateway`
    - Workflow name: `release.yml`
    - Environment name: `pypi`
 3. **Do the same on TestPyPI** at
@@ -53,20 +52,20 @@ tests, builds, and uploads to TestPyPI only. Then check the install:
 
 ```bash
 pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ mcp-rbac-gateway
-mcp-sentinel --version
+mcp-rbac-gateway --version
 ```
 
 ## Each release
 
-1. Bump `__version__` in `src/mcp_sentinel/__init__.py`. That is the only place the
+1. Bump `__version__` in `src/mcp_rbac_gateway/__init__.py`. That is the only place the
    version is set; `pyproject.toml` reads it from there.
 2. Add a section to `CHANGELOG.md`.
 3. Merge that to `main`, then tag the merge commit and push the tag:
 
    ```bash
    git checkout main && git pull
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.1.1
+   git push origin v0.1.1
    ```
 
 4. The **Release** workflow then runs the tests, checks that the tag matches

@@ -6,7 +6,7 @@ import io
 import httpx
 import pytest
 
-from mcp_sentinel import (
+from mcp_rbac_gateway import (
     ApprovalBroker,
     ApprovalGate,
     ApprovalRequest,
@@ -17,7 +17,7 @@ from mcp_sentinel import (
     WebhookApprover,
     create_approval_router,
 )
-from mcp_sentinel.config import HitlConfig, WebhookConfig
+from mcp_rbac_gateway.config import HitlConfig, WebhookConfig
 
 
 def req(**kw: object) -> ApprovalRequest:
@@ -121,7 +121,7 @@ async def test_webhook_inline_decision() -> None:
     resp = await approver.request_approval(req())
     assert resp.approved and resp.approver == "slack:carol"
     payload = seen[0]
-    assert payload["type"] == "mcp_sentinel.approval_request"
+    assert payload["type"] == "mcp_rbac_gateway.approval_request"
     assert payload["approve_url"].startswith("https://sentinel.test/approvals/")
     assert approver.broker.pending() == []  # cleaned up
 

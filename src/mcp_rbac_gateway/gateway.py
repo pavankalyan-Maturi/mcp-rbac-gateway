@@ -41,11 +41,11 @@ __all__ = [
     "current_agent",
 ]
 
-logger = logging.getLogger("mcp_sentinel")
+logger = logging.getLogger("mcp_rbac_gateway")
 T = TypeVar("T")
 
 _current_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "mcp_sentinel_agent", default=None
+    "mcp_rbac_gateway_agent", default=None
 )
 
 
@@ -72,7 +72,7 @@ class ToolBlockedError(PermissionError):
     """Raised by guarded functions when sentinel blocks a call."""
 
     def __init__(self, verdict: CallVerdict | None, reason: str, decision: AuditDecision):
-        super().__init__(f"[mcp-sentinel] {decision.value}: {reason}")
+        super().__init__(f"[mcp-rbac-gateway] {decision.value}: {reason}")
         self.verdict = verdict
         self.reason = reason
         self.decision = decision
@@ -343,7 +343,7 @@ class Sentinel:
         agent_id: str | None = None,
         on_block: OnBlock = "raise",
     ) -> Any:
-        """Decorator form of :meth:`call`. See :func:`mcp_sentinel.proxy.guard`."""
+        """Decorator form of :meth:`call`. See :func:`mcp_rbac_gateway.proxy.guard`."""
         from .proxy import guard
 
         decorator = guard(self, tool=tool, agent_id=agent_id, on_block=on_block)

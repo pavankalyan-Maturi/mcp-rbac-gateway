@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from mcp_sentinel import Scanner
-from mcp_sentinel.config import ScannerConfig
-from mcp_sentinel.scanner import BUILTIN_DETECTORS, luhn_valid
+from mcp_rbac_gateway import Scanner
+from mcp_rbac_gateway.config import ScannerConfig
+from mcp_rbac_gateway.scanner import BUILTIN_DETECTORS, luhn_valid
 
 SECRETS = {
     "aws_access_key": "AKIAIOSFODNN7EXAMPLE",

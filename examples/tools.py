@@ -1,7 +1,7 @@
 """Plain async Python tools shared by the examples.
 
 They are deliberately naive: one returns customer PII, one returns a web page
-containing a prompt-injection attack. mcp-sentinel is what makes them safe to
+containing a prompt-injection attack. mcp-rbac-gateway is what makes them safe to
 hand to an agent.
 """
 

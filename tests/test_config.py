@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from mcp_sentinel import SentinelConfig, load_config
+from mcp_rbac_gateway import SentinelConfig, load_config
 
 
 def test_empty_config_is_valid() -> None:

@@ -1,8 +1,8 @@
 # Contributing
 
 ```bash
-git clone https://github.com/pavankalyan-Maturi/mcp-sentinel
-cd mcp-sentinel
+git clone https://github.com/pavankalyan-Maturi/mcp-rbac-gateway
+cd mcp-rbac-gateway
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev,langgraph]"
 

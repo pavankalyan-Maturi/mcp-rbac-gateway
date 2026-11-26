@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from mcp_sentinel import (
+from mcp_rbac_gateway import (
     AuditDecision,
     AuditLog,
     AutoApprover,
@@ -116,7 +116,7 @@ async def test_guard_return_mode(sentinel: Sentinel) -> None:
         return "deleted"
 
     out = await delete_file("/etc")
-    assert out.startswith("[mcp-sentinel] Tool 'delete_file' blocked (blocked_policy)")
+    assert out.startswith("[mcp-rbac-gateway] Tool 'delete_file' blocked (blocked_policy)")
 
 
 async def test_guard_passes_redacted_arguments_to_function(sentinel: Sentinel) -> None:
@@ -174,7 +174,7 @@ async def test_agent_context(sentinel: Sentinel) -> None:
     async def fetch_page(url: str) -> str:
         return "page"
 
-    assert (await fetch_page("u")).startswith("[mcp-sentinel]")  # default agent: guest
+    assert (await fetch_page("u")).startswith("[mcp-rbac-gateway]")  # default agent: guest
     with agent_context("researcher"):
         assert await fetch_page("u") == "page"
         # survives thread hops

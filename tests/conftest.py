@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_sentinel import AuditLog, AutoApprover, Sentinel, SentinelConfig
+from mcp_rbac_gateway import AuditLog, AutoApprover, Sentinel, SentinelConfig
 
 HERE = Path(__file__).parent
 MOCK_SERVER = [sys.executable, str(HERE / "mock_mcp_server.py")]

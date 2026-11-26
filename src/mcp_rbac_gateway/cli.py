@@ -1,4 +1,4 @@
-"""``mcp-sentinel`` command-line interface."""
+"""``mcp-rbac-gateway`` command-line interface."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from .config import SentinelConfig, load_config
 from .models import AuditDecision
 
 app = typer.Typer(
-    name="mcp-sentinel",
+    name="mcp-rbac-gateway",
     help="Security, RBAC and audit gateway for MCP servers and AI agents.",
     no_args_is_help=True,
     add_completion=False,
@@ -66,7 +66,7 @@ def _load(config: Path) -> SentinelConfig:
 
 def _version_cb(value: bool) -> None:
     if value:
-        out.print(f"mcp-sentinel {__version__}")
+        out.print(f"mcp-rbac-gateway {__version__}")
         raise typer.Exit()
 
 
@@ -100,7 +100,7 @@ def wrap(
     The upstream command comes from [bold]upstream.command[/] in the config,
     or from everything after [bold]--[/]:
 
-        mcp-sentinel wrap -c sentinel.yaml --agent researcher -- python -m my_server
+        mcp-rbac-gateway wrap -c sentinel.yaml --agent researcher -- python -m my_server
     """
     _setup_logging(verbose)
     cfg = _load(config)
@@ -116,7 +116,7 @@ def wrap(
     proxy = StdioProxy(
         sentinel, command, agent_id=agent, env=cfg.upstream.env, cwd=cfg.upstream.cwd
     )
-    logging.getLogger("mcp_sentinel").info(
+    logging.getLogger("mcp_rbac_gateway").info(
         "sentinel guarding [bold]%s[/] as agent [bold]%s[/]",
         " ".join(command),
         sentinel.agent_or_default(agent),
@@ -149,7 +149,7 @@ async def _serve_approvals(sentinel: Any, cfg: SentinelConfig, port: int) -> Non
     from .hitl import create_approval_router
 
     token_env = cfg.hitl.webhook.token_env
-    api = FastAPI(title="mcp-sentinel approvals")
+    api = FastAPI(title="mcp-rbac-gateway approvals")
     api.include_router(
         create_approval_router(sentinel.broker, os.environ.get(token_env) if token_env else None)
     )
@@ -198,7 +198,7 @@ def serve(
     )
     err.print(
         Panel.fit(
-            f"[bold]mcp-sentinel[/] {__version__}\n"
+            f"[bold]mcp-rbac-gateway[/] {__version__}\n"
             f"proxy    http://{host}:{port}{path}  (legacy SSE: /sse)\n"
             f"upstream {url}\n"
             f"approvals http://{host}:{port}/approvals",
@@ -271,7 +271,7 @@ def render_report(log: AuditLog, *, since: float | None, agent: str | None, limi
     header.add_row("calls", "allowed", "blocked", "redactions", "injection hits")
     window = f"{stamp(summary.first_ts)} → {stamp(summary.last_ts)}"
     overview = Panel(
-        header, title="[bold]mcp-sentinel report[/]", subtitle=window, border_style="cyan"
+        header, title="[bold]mcp-rbac-gateway report[/]", subtitle=window, border_style="cyan"
     )
 
     decisions = Table(title="Decisions", box=box.SIMPLE_HEAVY, expand=True)
@@ -472,7 +472,7 @@ class _NoopApprover:
 # --------------------------------------------------------------------- init
 
 SAMPLE_CONFIG = """\
-# mcp-sentinel configuration. Docs: https://github.com/pavankalyan-Maturi/mcp-sentinel
+# mcp-rbac-gateway configuration. Docs: https://github.com/pavankalyan-Maturi/mcp-rbac-gateway
 version: 1
 
 # Agents not listed below are governed by this agent's policy.
@@ -553,7 +553,7 @@ def init(
         raise typer.Exit(1)
     path.write_text(SAMPLE_CONFIG, encoding="utf-8")
     SentinelConfig.from_yaml_string(SAMPLE_CONFIG)  # sanity check
-    out.print(f"[green]wrote[/] {path}. Next: [bold]mcp-sentinel validate -c {path}[/]")
+    out.print(f"[green]wrote[/] {path}. Next: [bold]mcp-rbac-gateway validate -c {path}[/]")
 
 
 def main() -> None:  # pragma: no cover - console script entry point

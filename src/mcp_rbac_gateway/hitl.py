@@ -150,7 +150,7 @@ class CLIApprover:
         inp, out = self._streams()
         args = json.dumps(request.arguments, indent=2, ensure_ascii=False, default=str)
         out.write(
-            "\n\033[1;33m⚠  mcp-sentinel: approval required\033[0m\n"
+            "\n\033[1;33m⚠  mcp-rbac-gateway: approval required\033[0m\n"
             f"  agent : {request.agent_id}\n"
             f"  tool  : {request.tool}\n"
             f"  reason: {request.reason}\n"
@@ -218,7 +218,7 @@ class WebhookApprover:
     The webhook receives ``POST <url>`` with JSON::
 
         {
-          "type": "mcp_sentinel.approval_request",
+          "type": "mcp_rbac_gateway.approval_request",
           "request": {...ApprovalRequest...},
           "approve_url": "<callback_base_url>/approvals/<id>/approve",
           "deny_url": "<callback_base_url>/approvals/<id>/deny"
@@ -252,7 +252,7 @@ class WebhookApprover:
     async def _notify(self, request: ApprovalRequest) -> ApprovalResponse | None:
         base = (self.config.callback_base_url or "").rstrip("/")
         payload = {
-            "type": "mcp_sentinel.approval_request",
+            "type": "mcp_rbac_gateway.approval_request",
             "request": request.model_dump(mode="json"),
             "approve_url": f"{base}/approvals/{request.id}/approve" if base else None,
             "deny_url": f"{base}/approvals/{request.id}/deny" if base else None,
