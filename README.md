@@ -63,13 +63,24 @@ pip install "mcp-rbac-gateway[server]"      # HTTP proxy + approval API (FastAPI
 pip install "mcp-rbac-gateway[langgraph]"   # LangGraph example deps
 ```
 
-The package is published as `mcp-rbac-gateway`, because `mcp-sentinel` and names PyPI treats as
-too similar to it belong to other projects. You still `import mcp_sentinel` and run the
-`mcp-sentinel` command.
 
 Requires Python 3.10+. The core depends only on `pydantic`, `pyyaml`, `rich`, `typer` and `httpx`.
 
 ## Quick start
+
+> **Package name vs. import name.** You install **`mcp-rbac-gateway`** from PyPI, but the
+> Python module is **`mcp_sentinel`** and the command is **`mcp-sentinel`**:
+>
+> | What | Name |
+> | --- | --- |
+> | `pip install` | `mcp-rbac-gateway` |
+> | Python import | `import mcp_sentinel` |
+> | CLI command | `mcp-sentinel` |
+>
+> The PyPI name differs because `mcp-sentinel` and names PyPI treats as too similar to it
+> belong to other projects. One of them, `mcp-sentinel-cli`, also installs a module called
+> `mcp_sentinel` and a command called `mcp-sentinel`. Don't install both in the same
+> environment: whichever is installed last overwrites the other.
 
 ### 1. Write a policy
 
@@ -409,7 +420,13 @@ Webhook payload:
 ```
 
 The approval API is a FastAPI router you can mount in your own app. `mcp-sentinel serve`
-includes it, and `wrap --approval-port 8787` runs it next to a stdio proxy:
+includes it. To run it next to a stdio proxy, pass `--approval-port`:
+
+```bash
+mcp-sentinel wrap -c sentinel.yaml --approval-port 8787 -- python my_server.py
+```
+
+To mount it in your own FastAPI app:
 
 ```python
 from mcp_sentinel import create_approval_router

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 - 2026-11-26
+
+Documentation only. No code changes.
+
+- README: the Quick start now explains that the PyPI package is `mcp-rbac-gateway`
+  while the module and command are `mcp_sentinel` and `mcp-sentinel`, and warns that
+  `mcp-sentinel-cli` installs the same module and command names.
+- README: the approval API section now shows the full
+  `mcp-sentinel wrap ... --approval-port 8787` command in a code block.
+
 ## 0.1.0 - 2026-11-26
 
 First release, published to PyPI as `mcp-rbac-gateway`.

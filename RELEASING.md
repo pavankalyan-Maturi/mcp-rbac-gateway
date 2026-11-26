@@ -65,8 +65,8 @@ mcp-sentinel --version
 
    ```bash
    git checkout main && git pull
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.1.1
+   git push origin v0.1.1
    ```
 
 4. The **Release** workflow then runs the tests, checks that the tag matches
