@@ -500,7 +500,9 @@ class HttpProxy:
             from fastapi import FastAPI, Request, Response
             from fastapi.responses import JSONResponse, StreamingResponse
         except ImportError as exc:  # pragma: no cover
-            raise ImportError("install mcp-sentinel[server] to use the HTTP proxy") from exc
+            raise ImportError(
+                "run: pip install 'mcp-rbac-gateway[server]' to use the HTTP proxy"
+            ) from exc
 
         from .hitl import create_approval_router
 

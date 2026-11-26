@@ -295,7 +295,9 @@ def create_approval_router(broker: ApprovalBroker, token: str | None = None) -> 
     try:
         from fastapi import APIRouter, Depends, Header, HTTPException
     except ImportError as exc:  # pragma: no cover
-        raise ImportError("install mcp-sentinel[server] to use the approval API") from exc
+        raise ImportError(
+            "run: pip install 'mcp-rbac-gateway[server]' to use the approval API"
+        ) from exc
 
     import hmac
 
