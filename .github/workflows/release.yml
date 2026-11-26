@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/project/mcp-sentinel-gateway/
+      url: https://test.pypi.org/project/mcp-palisade/
     permissions:
       id-token: write
     steps:
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/mcp-sentinel-gateway/
+      url: https://pypi.org/project/mcp-palisade/
     permissions:
       id-token: write
     steps:
