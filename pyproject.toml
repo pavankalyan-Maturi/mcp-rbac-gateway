@@ -1,14 +1,15 @@
 [build-system]
-requires = ["hatchling>=1.24"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-sentinel"
-version = "0.1.0"
+name = "mcp-sentinel-gateway"
+dynamic = ["version"]
 description = "A lightweight security, RBAC, and audit gateway for Model Context Protocol (MCP) servers and AI agents."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Pavankalyan Maturi" }]
 keywords = ["mcp", "model-context-protocol", "ai-agents", "security", "rbac", "audit", "llm", "langgraph", "prompt-injection"]
 classifiers = [
@@ -16,7 +17,6 @@ classifiers = [
     "Framework :: AsyncIO",
     "Framework :: Pydantic :: 2",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
@@ -56,6 +56,13 @@ mcp-sentinel = "mcp_sentinel.cli:main"
 Homepage = "https://github.com/pavankalyan-Maturi/mcp-sentinel"
 Repository = "https://github.com/pavankalyan-Maturi/mcp-sentinel"
 Issues = "https://github.com/pavankalyan-Maturi/mcp-sentinel/issues"
+Changelog = "https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/mcp_sentinel/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_sentinel"]
