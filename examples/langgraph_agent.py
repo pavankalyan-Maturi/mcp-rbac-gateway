@@ -1,4 +1,4 @@
-"""A LangGraph agent whose tools are guarded by mcp-sentinel.
+"""A LangGraph agent whose tools are guarded by mcp-rbac-gateway.
 
 Run it:
 
@@ -11,7 +11,7 @@ output is deterministic. Set ``ANTHROPIC_API_KEY`` (and
 
 Then look at what happened:
 
-    mcp-sentinel report -c examples/sentinel.yaml
+    mcp-rbac-gateway report -c examples/sentinel.yaml
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 sys.path.insert(0, str(Path(__file__).parent))
 import tools as raw  # noqa: E402
 
-from mcp_sentinel import Sentinel, agent_context, guard  # noqa: E402
+from mcp_rbac_gateway import Sentinel, agent_context, guard  # noqa: E402
 
 HERE = Path(__file__).parent
 
@@ -130,7 +130,7 @@ async def main() -> None:
         elif isinstance(msg, AIMessage) and msg.content:
             print(f"🤖 {msg.content}")
     sentinel.close()
-    print("\nAudit trail: mcp-sentinel report -c examples/sentinel.yaml --since 1h")
+    print("\nAudit trail: mcp-rbac-gateway report -c examples/sentinel.yaml --since 1h")
 
 
 if __name__ == "__main__":

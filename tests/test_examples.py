@@ -26,7 +26,7 @@ def load(name: str) -> ModuleType:
 
 
 def test_example_config_validates() -> None:
-    from mcp_sentinel import load_config
+    from mcp_rbac_gateway import load_config
 
     cfg = load_config(EXAMPLES / "sentinel.yaml")
     assert {"guest", "support-bot", "ops-agent"} <= set(cfg.agents)
@@ -35,7 +35,7 @@ def test_example_config_validates() -> None:
 async def test_langgraph_example(tmp_path: Path) -> None:
     from langchain_core.messages import HumanMessage, ToolMessage
 
-    from mcp_sentinel import AuditDecision, Sentinel, agent_context, load_config
+    from mcp_rbac_gateway import AuditDecision, Sentinel, agent_context, load_config
 
     mod = load("langgraph_agent")
     cfg = load_config(EXAMPLES / "sentinel.yaml")

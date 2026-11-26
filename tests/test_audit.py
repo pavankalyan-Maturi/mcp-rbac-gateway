@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from mcp_sentinel import AuditDecision, AuditEvent, AuditLog, Finding
-from mcp_sentinel.config import AuditConfig
+from mcp_rbac_gateway import AuditDecision, AuditEvent, AuditLog, Finding
+from mcp_rbac_gateway.config import AuditConfig
 
 
 def ev(**kw: object) -> AuditEvent:

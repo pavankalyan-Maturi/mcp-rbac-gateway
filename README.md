@@ -1,4 +1,4 @@
-# mcp-sentinel
+# mcp-rbac-gateway
 
 **A lightweight security, RBAC and audit gateway for Model Context Protocol (MCP) servers and AI agents.**
 
@@ -13,11 +13,11 @@ connecting those tools easy. It didn't decide **who** may call **what**, with **
 arguments**, what happens when a tool returns a **prompt injection**, or how you find out
 afterwards what an agent did.
 
-mcp-sentinel sits between the agent and its tools and answers those questions with one
+mcp-rbac-gateway sits between the agent and its tools and answers those questions with one
 YAML file:
 
 ```text
-agent ──► mcp-sentinel ──► MCP server / Python tool
+agent ──► mcp-rbac-gateway ──► MCP server / Python tool
            ├─ policy     who may call which tool, with which arguments
            ├─ scanner    redact secrets & PII both ways, catch prompt injection
            ├─ approval   pause risky calls for a human (CLI or webhook)
@@ -68,25 +68,11 @@ Requires Python 3.10+. The core depends only on `pydantic`, `pyyaml`, `rich`, `t
 
 ## Quick start
 
-> **Package name vs. import name.** You install **`mcp-rbac-gateway`** from PyPI, but the
-> Python module is **`mcp_sentinel`** and the command is **`mcp-sentinel`**:
->
-> | What | Name |
-> | --- | --- |
-> | `pip install` | `mcp-rbac-gateway` |
-> | Python import | `import mcp_sentinel` |
-> | CLI command | `mcp-sentinel` |
->
-> The PyPI name differs because `mcp-sentinel` and names PyPI treats as too similar to it
-> belong to other projects. One of them, `mcp-sentinel-cli`, also installs a module called
-> `mcp_sentinel` and a command called `mcp-sentinel`. Don't install both in the same
-> environment: whichever is installed last overwrites the other.
-
 ### 1. Write a policy
 
 ```bash
-mcp-sentinel init            # writes a commented sentinel.yaml
-mcp-sentinel validate        # shows the effective policy for each agent
+mcp-rbac-gateway init            # writes a commented sentinel.yaml
+mcp-rbac-gateway validate        # shows the effective policy for each agent
 ```
 
 ```yaml
@@ -116,7 +102,7 @@ hitl:
 ### 2a. Put it in front of an MCP server (no code changes)
 
 ```bash
-mcp-sentinel wrap --config sentinel.yaml --agent researcher -- \
+mcp-rbac-gateway wrap --config sentinel.yaml --agent researcher -- \
     npx -y @modelcontextprotocol/server-filesystem /workspace
 ```
 
@@ -125,7 +111,7 @@ server's own (see [`examples/claude_desktop_config.json`](https://github.com/pav
 For HTTP servers:
 
 ```bash
-mcp-sentinel serve --config sentinel.yaml --upstream-url http://localhost:8000/mcp --port 8765
+mcp-rbac-gateway serve --config sentinel.yaml --upstream-url http://localhost:8000/mcp --port 8765
 # clients connect to http://localhost:8765/mcp (or /sse for legacy SSE clients)
 ```
 
@@ -133,7 +119,7 @@ mcp-sentinel serve --config sentinel.yaml --upstream-url http://localhost:8000/m
 
 ```python
 from langchain_core.tools import tool
-from mcp_sentinel import Sentinel, agent_context, guard
+from mcp_rbac_gateway import Sentinel, agent_context, guard
 
 sentinel = Sentinel.from_yaml("sentinel.yaml")
 
@@ -150,11 +136,11 @@ with agent_context("researcher"):        # identity for every call in this block
 ### 3. See what happened
 
 ```bash
-mcp-sentinel report --since 24h
+mcp-rbac-gateway report --since 24h
 ```
 
 ```text
-╭──────────────────────────── mcp-sentinel report ─────────────────────────────╮
+╭────────────────────────── mcp-rbac-gateway report ───────────────────────────╮
 │   6        2         4          5              1                             │
 │ calls   allowed   blocked   redactions   injection hits                      │
 ╰──────────────────── 2026-11-26 21:52:43 → 2026-11-26 21:52:43 ───────────────╯
@@ -180,9 +166,9 @@ flowchart LR
         A3["FastAPI service"]
     end
 
-    subgraph Sentinel["mcp-sentinel"]
+    subgraph Sentinel["mcp-rbac-gateway"]
         direction TB
-        T1["StdioProxy<br/>mcp-sentinel wrap"]
+        T1["StdioProxy<br/>mcp-rbac-gateway wrap"]
         T2["HttpProxy<br/>Streamable HTTP + SSE"]
         T3["@guard decorator"]
         I["MessageInterceptor<br/>JSON-RPC inspection"]
@@ -213,7 +199,7 @@ flowchart LR
     A3 --> T3
     H -.->|"prompt"| Human(("Human"))
     H -.->|"POST"| W["Webhook / Slack relay"]
-    AU --> R["mcp-sentinel report"]
+    AU --> R["mcp-rbac-gateway report"]
 ```
 
 ### Life of a tool call
@@ -222,7 +208,7 @@ flowchart LR
 sequenceDiagram
     autonumber
     participant Agent
-    participant Proxy as mcp-sentinel
+    participant Proxy as mcp-rbac-gateway
     participant Human
     participant Server as MCP server
     participant DB as Audit DB
@@ -241,7 +227,7 @@ sequenceDiagram
     end
     alt blocked
         Proxy->>DB: blocked_policy / denied_by_human / approval_timeout
-        Proxy-->>Agent: isError: "[mcp-sentinel] Tool call blocked ..."
+        Proxy-->>Agent: isError: "[mcp-rbac-gateway] Tool call blocked ..."
     else allowed
         Proxy->>Server: tools/call (sanitised arguments)
         Server-->>Proxy: result
@@ -309,7 +295,7 @@ from the environment.
 | `upstream.command` / `url` | - | Default upstream for `wrap` / `serve`. |
 
 The full annotated example is in [`examples/sentinel.yaml`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/examples/sentinel.yaml), and
-`mcp-sentinel init` writes another one.
+`mcp-rbac-gateway init` writes another one.
 
 ## Policy & RBAC
 
@@ -336,7 +322,7 @@ it can't call. That saves tokens and gives it fewer chances to try.
 Dry-run any decision:
 
 ```bash
-$ mcp-sentinel check -a researcher read_file '{"path": "/workspace/../etc/passwd"}'
+$ mcp-rbac-gateway check -a researcher read_file '{"path": "/workspace/../etc/passwd"}'
 ╭──────────────────────────────── read_file ─────────────────────────────────╮
 │ agent    researcher                                                        │
 │ decision deny                                                              │
@@ -411,7 +397,7 @@ Webhook payload:
 
 ```json
 {
-  "type": "mcp_sentinel.approval_request",
+  "type": "mcp_rbac_gateway.approval_request",
   "request": {"id": "9f1c…", "agent_id": "ops-agent", "tool": "delete_file",
               "arguments": {"path": "docs/old.md"}, "reason": "…", "timeout_seconds": 300},
   "approve_url": "https://sentinel.internal/approvals/9f1c…/approve",
@@ -419,17 +405,17 @@ Webhook payload:
 }
 ```
 
-The approval API is a FastAPI router you can mount in your own app. `mcp-sentinel serve`
+The approval API is a FastAPI router you can mount in your own app. `mcp-rbac-gateway serve`
 includes it. To run it next to a stdio proxy, pass `--approval-port`:
 
 ```bash
-mcp-sentinel wrap -c sentinel.yaml --approval-port 8787 -- python my_server.py
+mcp-rbac-gateway wrap -c sentinel.yaml --approval-port 8787 -- python my_server.py
 ```
 
 To mount it in your own FastAPI app:
 
 ```python
-from mcp_sentinel import create_approval_router
+from mcp_rbac_gateway import create_approval_router
 app.include_router(create_approval_router(sentinel.broker, token="shared-secret"))
 # GET  /approvals                 pending requests
 # POST /approvals/{id}/approve    {"approver": "alice", "comment": "ok"}
@@ -439,7 +425,7 @@ app.include_router(create_approval_router(sentinel.broker, token="shared-secret"
 Custom logic, such as Slack buttons, a ticketing system or a second model as a reviewer, is one class:
 
 ```python
-from mcp_sentinel import ApprovalRequest, ApprovalResponse, Sentinel
+from mcp_rbac_gateway import ApprovalRequest, ApprovalResponse, Sentinel
 
 class SlackApprover:
     async def request_approval(self, request: ApprovalRequest) -> ApprovalResponse:
@@ -452,7 +438,7 @@ sentinel = Sentinel.from_yaml("sentinel.yaml", approver=SlackApprover())
 ## Python API & decorator
 
 ```python
-from mcp_sentinel import Sentinel, ToolBlockedError, agent_context, guard
+from mcp_rbac_gateway import Sentinel, ToolBlockedError, agent_context, guard
 
 sentinel = Sentinel.from_yaml("sentinel.yaml")
 
@@ -471,7 +457,7 @@ except ToolBlockedError as exc:
 
 - The function receives **sanitised** arguments, with secrets already redacted, and its
   return value is redacted and scanned before it reaches the caller.
-- `on_block="return"` returns a `"[mcp-sentinel] …"` string instead of raising. This is
+- `on_block="return"` returns a `"[mcp-rbac-gateway] …"` string instead of raising. This is
   usually what you want inside an agent loop, because the model can read the refusal and
   change course.
 - Lower-level building blocks: `sentinel.check_call(...)`, `sentinel.check_result(...)`,
@@ -492,10 +478,10 @@ Every call produces one row in SQLite (WAL mode, so `report` can read while a pr
 | `findings`, `redactions`, `injection_score` | what the scanner found (never the secret itself) |
 
 ```bash
-mcp-sentinel report --since 7d                 # dashboard
-mcp-sentinel report --agent ops-agent --limit 50
-mcp-sentinel report --watch 2                  # live refresh
-mcp-sentinel report --json | jq .by_decision   # for scripts and alerts
+mcp-rbac-gateway report --since 7d                 # dashboard
+mcp-rbac-gateway report --agent ops-agent --limit 50
+mcp-rbac-gateway report --watch 2                  # live refresh
+mcp-rbac-gateway report --json | jq .by_decision   # for scripts and alerts
 ```
 
 Or query it from Python with `AuditLog(path).query(blocked_only=True)` and `.summary()`.
@@ -504,12 +490,12 @@ Or query it from Python with `AuditLog(path).query(blocked_only=True)` and `.sum
 
 | Command | Purpose |
 | --- | --- |
-| `mcp-sentinel wrap -c CFG [--agent A] [--approval-port P] -- CMD…` | stdio proxy around an MCP server process |
-| `mcp-sentinel serve -c CFG --upstream-url URL [--port 8765]` | HTTP proxy (Streamable HTTP at `/mcp`, legacy SSE at `/sse`) with the approval API |
-| `mcp-sentinel report [--db DB] [--since 24h] [--agent A] [--json] [--watch N]` | Rich dashboard |
-| `mcp-sentinel validate -c CFG` | validate the config and print effective policies |
-| `mcp-sentinel check TOOL 'JSON' -a AGENT` | dry-run one decision (exit code 1 if denied) |
-| `mcp-sentinel init [PATH]` | write a starter config |
+| `mcp-rbac-gateway wrap -c CFG [--agent A] [--approval-port P] -- CMD…` | stdio proxy around an MCP server process |
+| `mcp-rbac-gateway serve -c CFG --upstream-url URL [--port 8765]` | HTTP proxy (Streamable HTTP at `/mcp`, legacy SSE at `/sse`) with the approval API |
+| `mcp-rbac-gateway report [--db DB] [--since 24h] [--agent A] [--json] [--watch N]` | Rich dashboard |
+| `mcp-rbac-gateway validate -c CFG` | validate the config and print effective policies |
+| `mcp-rbac-gateway check TOOL 'JSON' -a AGENT` | dry-run one decision (exit code 1 if denied) |
+| `mcp-rbac-gateway init [PATH]` | write a starter config |
 
 In `wrap`, stdout carries the MCP protocol, so all logs and prompts go to stderr and `/dev/tty`.
 
@@ -531,7 +517,7 @@ Both examples run as part of the test suite (`tests/test_examples.py`).
 
 ## Security model and limits
 
-mcp-sentinel is **defence in depth**, not a sandbox.
+mcp-rbac-gateway is **defence in depth**, not a sandbox.
 
 - **Detection is heuristic.** The injection scanner catches common attack patterns, not
   all of them. Pair it with least-privilege policies and approvals for anything destructive.
@@ -555,7 +541,7 @@ pytest -q          # 128 tests: unit, plus integration against mock stdio/HTTP/S
 ruff check src tests examples && mypy src
 ```
 
-The integration tests start real `mcp-sentinel wrap` processes and real uvicorn servers
+The integration tests start real `mcp-rbac-gateway wrap` processes and real uvicorn servers
 in front of mock MCP servers ([`tests/mock_mcp_server.py`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/tests/mock_mcp_server.py),
 [`tests/mock_http_server.py`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/tests/mock_http_server.py)). They also check that a blocked
 call never reaches the upstream server.

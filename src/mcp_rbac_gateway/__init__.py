@@ -1,4 +1,4 @@
-"""mcp-sentinel: security, RBAC and audit gateway for MCP servers and AI agents."""
+"""mcp-rbac-gateway: security, RBAC and audit gateway for MCP servers and AI agents."""
 
 from __future__ import annotations
 

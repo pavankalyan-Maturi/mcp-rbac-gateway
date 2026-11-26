@@ -6,7 +6,7 @@ rather than a public issue. You should get a reply within a few days.
 
 ## Scope and limits
 
-mcp-sentinel is a defence-in-depth layer. Keep these limits in mind:
+mcp-rbac-gateway is a defence-in-depth layer. Keep these limits in mind:
 
 - **Prompt-injection detection is heuristic.** It catches common attack
   patterns, not every possible one. Use least-privilege policies and human

@@ -1,4 +1,4 @@
-"""End-to-end tests: real `mcp-sentinel wrap` process in front of a mock MCP server."""
+"""End-to-end tests: real `mcp-rbac-gateway wrap` process in front of a mock MCP server."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_sentinel import AuditDecision, AuditLog
+from mcp_rbac_gateway import AuditDecision, AuditLog
 
 from .conftest import MOCK_SERVER
 from .mcp_client import StdioClient, text_of
@@ -32,7 +32,7 @@ async def start(config_file: Path, calls_log: Path, agent: str) -> StdioClient:
     return await StdioClient.spawn(
         sys.executable,
         "-m",
-        "mcp_sentinel.cli",
+        "mcp_rbac_gateway.cli",
         "wrap",
         "--config",
         str(config_file),

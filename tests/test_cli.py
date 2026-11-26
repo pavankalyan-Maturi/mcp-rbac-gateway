@@ -7,8 +7,8 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from mcp_sentinel import AuditDecision, AuditEvent, AuditLog, SentinelConfig, __version__
-from mcp_sentinel.cli import SAMPLE_CONFIG, app, parse_since
+from mcp_rbac_gateway import AuditDecision, AuditEvent, AuditLog, SentinelConfig, __version__
+from mcp_rbac_gateway.cli import SAMPLE_CONFIG, app, parse_since
 
 runner = CliRunner()
 
@@ -121,7 +121,7 @@ def test_report(tmp_path: Path) -> None:
     seed(db)
     result = runner.invoke(app, ["report", "--db", str(db), "--since", "all"])
     assert result.exit_code == 0, result.output
-    for text in ("mcp-sentinel report", "read_file", "blocked_policy", "operator", "[x]"):
+    for text in ("mcp-rbac-gateway report", "read_file", "blocked_policy", "operator", "[x]"):
         assert text in result.output
 
 

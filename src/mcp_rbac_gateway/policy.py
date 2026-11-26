@@ -9,7 +9,7 @@ Rules are evaluated in a fixed, easy-to-reason-about order:
 3. **arguments** - every constraint whose tool glob matches is checked against
    the raw (un-redacted) arguments. Any violation denies the call.
 4. **require_approval** - if a ``require_approval`` glob matches, the call is
-   allowed only after a human approves it (see :mod:`mcp_sentinel.hitl`).
+   allowed only after a human approves it (see :mod:`mcp_rbac_gateway.hitl`).
 
 Agents that are not listed in the config are evaluated with the policy of
 ``default_agent``. If that agent is not defined either, only

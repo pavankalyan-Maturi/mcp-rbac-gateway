@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "filesystem (guarded)": {
-      "command": "mcp-sentinel",
+      "command": "mcp-rbac-gateway",
       "args": [
         "wrap",
         "--config", "/absolute/path/to/sentinel.yaml",

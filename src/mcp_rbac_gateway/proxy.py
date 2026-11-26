@@ -47,9 +47,9 @@ __all__ = [
     "guard",
 ]
 
-logger = logging.getLogger("mcp_sentinel.proxy")
+logger = logging.getLogger("mcp_rbac_gateway.proxy")
 
-BLOCK_PREFIX = "[mcp-sentinel]"
+BLOCK_PREFIX = "[mcp-rbac-gateway]"
 OnBlock = Literal["raise", "return"]
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -506,7 +506,7 @@ class HttpProxy:
 
         from .hitl import create_approval_router
 
-        app = FastAPI(title="mcp-sentinel", version=_version())
+        app = FastAPI(title="mcp-rbac-gateway", version=_version())
         app.include_router(create_approval_router(self.sentinel.broker, self.approval_token))
         proxy = self
 
@@ -779,7 +779,7 @@ def _version() -> str:
 # =========================================================================
 
 _SKIP_PARAMS = {"self", "cls"}
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp-sentinel")
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp-rbac-gateway")
 
 
 def guard(
@@ -802,9 +802,9 @@ def guard(
     Args:
         tool: Tool name used for policy matching (defaults to ``fn.__name__``).
         agent_id: Fixed agent identity. When omitted, the identity bound with
-            :func:`mcp_sentinel.agent_context` is used, then ``default_agent``.
+            :func:`mcp_rbac_gateway.agent_context` is used, then ``default_agent``.
         on_block: ``"raise"`` raises :class:`ToolBlockedError`; ``"return"``
-            returns a ``"[mcp-sentinel] ..."`` string the LLM can read and
+            returns a ``"[mcp-rbac-gateway] ..."`` string the LLM can read and
             recover from, which is usually what agent frameworks want.
     """
 

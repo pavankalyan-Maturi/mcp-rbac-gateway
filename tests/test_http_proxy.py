@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from mcp_sentinel import HttpProxy, Sentinel, SentinelConfig
+from mcp_rbac_gateway import HttpProxy, Sentinel, SentinelConfig
 
 from .mock_http_server import create_app
 from .servers import serve

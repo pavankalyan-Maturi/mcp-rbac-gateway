@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from mcp_sentinel import PolicyAction, PolicyEngine, SentinelConfig
+from mcp_rbac_gateway import PolicyAction, PolicyEngine, SentinelConfig
 
 
 @pytest.fixture

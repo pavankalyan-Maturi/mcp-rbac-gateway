@@ -7,7 +7,7 @@ never becomes a second copy of the secrets it is meant to protect.
 
 Writes run in a worker thread (``asyncio.to_thread``) so the event loop is
 never blocked by disk I/O. The database uses WAL mode, which lets
-``mcp-sentinel report`` read while a proxy is writing.
+``mcp-rbac-gateway report`` read while a proxy is writing.
 """
 
 from __future__ import annotations
