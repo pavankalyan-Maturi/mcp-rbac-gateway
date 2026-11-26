@@ -35,11 +35,11 @@ Do these once, as the repository owner.
    - Repository name: `mcp-sentinel`
    - Workflow name: `release.yml`
    - Environment name: `pypi`
-3. **Do the same on TestPyPI** at
-   [test.pypi.org/manage/account/publishing](https://test.pypi.org/manage/account/publishing/).
-   Use the same values, except the environment name is `testpypi`.
-4. **Create two GitHub environments** under the repository's
-   *Settings → Environments*: `testpypi` and `pypi`. For `pypi`, it's worth adding
+3. *(Optional)* **Do the same on TestPyPI** at
+   [test.pypi.org/manage/account/publishing](https://test.pypi.org/manage/account/publishing/),
+   with environment name `testpypi`. You only need this for the dry run below.
+4. **Create the GitHub environment** `pypi` (and `testpypi` if you set up step 3) under the repository's
+   *Settings → Environments*. For `pypi`, it's worth adding
    yourself as a *required reviewer*. Every real release then waits for one click from
    you before it uploads.
 
@@ -70,8 +70,22 @@ mcp-sentinel --version
    ```
 
 4. The **Release** workflow then runs the tests, checks that the tag matches
-   `__version__`, builds, uploads to TestPyPI, then to PyPI (after your approval if you
+   `__version__`, builds, uploads to PyPI (after your approval if you
    set a reviewer), and creates a GitHub release with the files attached.
 
 PyPI never lets you re-upload the same version, even after deleting it. If something is
 wrong after a release, bump to the next patch version (`0.1.1`) and release again.
+
+## If a release run fails
+
+Fix the cause first. If the fix is a change to the repository, merge it, then point the tag
+at the new commit and push it again (only safe while that version is not yet on PyPI):
+
+```bash
+git checkout main && git pull
+git tag -d v0.1.0 && git push --delete origin v0.1.0
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+If the fix was only on the PyPI side (for example a publisher setting), use
+**Re-run failed jobs** on the run instead.
