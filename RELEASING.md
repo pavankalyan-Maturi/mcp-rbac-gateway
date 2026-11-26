@@ -1,8 +1,8 @@
 # Releasing
 
 The package is published to PyPI as **`mcp-rbac-gateway`**. Since 0.1.1 the import name
-(`mcp_rbac_gateway`) and the command (`mcp-rbac-gateway`) match it. The GitHub repository
-is still called `mcp-sentinel`.
+(`mcp_rbac_gateway`) and the command (`mcp-rbac-gateway`) match it, and so does the GitHub repository
+(`pavankalyan-Maturi/mcp-rbac-gateway`).
 
 Publishing uses [trusted publishing](https://docs.pypi.org/trusted-publishers/): GitHub
 Actions proves who it is to PyPI with OIDC, so no API token is stored anywhere.

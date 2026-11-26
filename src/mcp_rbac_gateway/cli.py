@@ -472,7 +472,7 @@ class _NoopApprover:
 # --------------------------------------------------------------------- init
 
 SAMPLE_CONFIG = """\
-# mcp-rbac-gateway configuration. Docs: https://github.com/pavankalyan-Maturi/mcp-sentinel
+# mcp-rbac-gateway configuration. Docs: https://github.com/pavankalyan-Maturi/mcp-rbac-gateway
 version: 1
 
 # Agents not listed below are governed by this agent's policy.

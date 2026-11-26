@@ -53,10 +53,10 @@ dev = [
 mcp-rbac-gateway = "mcp_rbac_gateway.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/pavankalyan-Maturi/mcp-sentinel"
-Repository = "https://github.com/pavankalyan-Maturi/mcp-sentinel"
-Issues = "https://github.com/pavankalyan-Maturi/mcp-sentinel/issues"
-Changelog = "https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/pavankalyan-Maturi/mcp-rbac-gateway"
+Repository = "https://github.com/pavankalyan-Maturi/mcp-rbac-gateway"
+Issues = "https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/issues"
+Changelog = "https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 path = "src/mcp_rbac_gateway/__init__.py"
