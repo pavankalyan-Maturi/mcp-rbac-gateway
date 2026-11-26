@@ -2,7 +2,7 @@
 
 Run it:
 
-    pip install "mcp-sentinel[langgraph]"
+    pip install "mcp-rbac-gateway[langgraph]"
     python examples/langgraph_agent.py
 
 By default it uses a scripted model, so it runs offline with no API key and the
