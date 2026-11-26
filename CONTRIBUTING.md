@@ -19,3 +19,5 @@ Guidelines:
 - New scanner detectors need a positive test *and* a false-positive test.
 - Fail closed: when something goes wrong in a security path, block the call.
 - Never write a raw secret to logs, audit rows, approval prompts, or excerpts.
+
+Releases: see [RELEASING.md](RELEASING.md).

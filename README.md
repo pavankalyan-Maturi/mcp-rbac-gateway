@@ -3,6 +3,7 @@
 **A lightweight security, RBAC and audit gateway for Model Context Protocol (MCP) servers and AI agents.**
 
 [![CI](https://github.com/pavankalyan-Maturi/mcp-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/pavankalyan-Maturi/mcp-sentinel/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mcp-sentinel-gateway)](https://pypi.org/project/mcp-sentinel-gateway/)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)
 ![Typed](https://img.shields.io/badge/typing-strict-success)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -55,12 +56,15 @@ Both paths share the same engine, so a rule behaves the same way whichever route
 ## Install
 
 ```bash
-pip install "mcp-sentinel @ git+https://github.com/pavankalyan-Maturi/mcp-sentinel"
+pip install mcp-sentinel-gateway
 
 # extras
-pip install "mcp-sentinel[server] @ git+https://github.com/pavankalyan-Maturi/mcp-sentinel"     # HTTP proxy + approval API (FastAPI, uvicorn)
-pip install "mcp-sentinel[langgraph] @ git+https://github.com/pavankalyan-Maturi/mcp-sentinel"  # LangGraph example deps
+pip install "mcp-sentinel-gateway[server]"      # HTTP proxy + approval API (FastAPI, uvicorn)
+pip install "mcp-sentinel-gateway[langgraph]"   # LangGraph example deps
 ```
+
+The package is published as `mcp-sentinel-gateway`, because `mcp-sentinel` on PyPI belongs to
+an unrelated project. You still `import mcp_sentinel` and run the `mcp-sentinel` command.
 
 Requires Python 3.10+. The core depends only on `pydantic`, `pyyaml`, `rich`, `typer` and `httpx`.
 
@@ -105,7 +109,7 @@ mcp-sentinel wrap --config sentinel.yaml --agent researcher -- \
 ```
 
 In Claude Desktop, Cursor or any other MCP client, use that command in place of the
-server's own (see [`examples/claude_desktop_config.json`](examples/claude_desktop_config.json)).
+server's own (see [`examples/claude_desktop_config.json`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/examples/claude_desktop_config.json)).
 For HTTP servers:
 
 ```bash
@@ -292,7 +296,7 @@ from the environment.
 | `audit.log_arguments` / `log_results` | `true` / `false` | What to store (always after redaction). |
 | `upstream.command` / `url` | - | Default upstream for `wrap` / `serve`. |
 
-The full annotated example is in [`examples/sentinel.yaml`](examples/sentinel.yaml), and
+The full annotated example is in [`examples/sentinel.yaml`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/examples/sentinel.yaml), and
 `mcp-sentinel init` writes another one.
 
 ## Policy & RBAC
@@ -495,10 +499,10 @@ In `wrap`, stdout carries the MCP protocol, so all logs and prompts go to stderr
 
 | File | What it shows |
 | --- | --- |
-| [`examples/langgraph_agent.py`](examples/langgraph_agent.py) | A LangGraph `StateGraph` + `ToolNode` agent with guarded tools: a poisoned search result is withheld, customer PII is redacted, path traversal and write SQL are denied. Runs offline with a scripted model; set `ANTHROPIC_API_KEY` to use Claude. |
-| [`examples/fastapi_app.py`](examples/fastapi_app.py) | A FastAPI service with guarded tool endpoints, the same agent behind `/agent/run`, the approval API, and `/audit/summary`. The ops agent pauses on `delete_file` and `DROP TABLE` until someone calls `/approvals/{id}/approve`. |
-| [`examples/sentinel.yaml`](examples/sentinel.yaml) | The policy both examples use. |
-| [`examples/claude_desktop_config.json`](examples/claude_desktop_config.json) | Guarding an off-the-shelf MCP server in Claude Desktop. |
+| [`examples/langgraph_agent.py`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/examples/langgraph_agent.py) | A LangGraph `StateGraph` + `ToolNode` agent with guarded tools: a poisoned search result is withheld, customer PII is redacted, path traversal and write SQL are denied. Runs offline with a scripted model; set `ANTHROPIC_API_KEY` to use Claude. |
+| [`examples/fastapi_app.py`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/examples/fastapi_app.py) | A FastAPI service with guarded tool endpoints, the same agent behind `/agent/run`, the approval API, and `/audit/summary`. The ops agent pauses on `delete_file` and `DROP TABLE` until someone calls `/approvals/{id}/approve`. |
+| [`examples/sentinel.yaml`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/examples/sentinel.yaml) | The policy both examples use. |
+| [`examples/claude_desktop_config.json`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/examples/claude_desktop_config.json) | Guarding an off-the-shelf MCP server in Claude Desktop. |
 
 ```bash
 python examples/langgraph_agent.py
@@ -523,7 +527,7 @@ mcp-sentinel is **defence in depth**, not a sandbox.
 - JSON-RPC batches are inspected item by item. Messages the proxy doesn't need to
   understand pass through unchanged.
 
-See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
+See [SECURITY.md](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/SECURITY.md) for how to report a vulnerability.
 
 ## Development
 
@@ -534,8 +538,8 @@ ruff check src tests examples && mypy src
 ```
 
 The integration tests start real `mcp-sentinel wrap` processes and real uvicorn servers
-in front of mock MCP servers ([`tests/mock_mcp_server.py`](tests/mock_mcp_server.py),
-[`tests/mock_http_server.py`](tests/mock_http_server.py)). They also check that a blocked
+in front of mock MCP servers ([`tests/mock_mcp_server.py`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/tests/mock_mcp_server.py),
+[`tests/mock_http_server.py`](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/tests/mock_http_server.py)). They also check that a blocked
 call never reaches the upstream server.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Released under the [MIT License](LICENSE).
+See [CONTRIBUTING.md](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/CONTRIBUTING.md). Released under the [MIT License](https://github.com/pavankalyan-Maturi/mcp-sentinel/blob/main/LICENSE).
