@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-palisade"
+name = "mcp-rbac-gateway"
 dynamic = ["version"]
 description = "A lightweight security, RBAC, and audit gateway for Model Context Protocol (MCP) servers and AI agents."
 readme = "README.md"

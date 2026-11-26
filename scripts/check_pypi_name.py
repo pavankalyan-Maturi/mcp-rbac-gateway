@@ -5,7 +5,7 @@ PyPI normalizes names (drops ``.``, ``_`` and ``-``, lowercases, and treats
 with an existing project. This script downloads the full simple index (about 45 MB)
 and does the same comparison.
 
-    python scripts/check_pypi_name.py mcp-palisade [more names...]
+    python scripts/check_pypi_name.py mcp-rbac-gateway [more names...]
 
 Exit code 0 means every name is free under that rule, 1 means at least one collides.
 PyPI may still refuse a name for other reasons (prohibited names, standard-library

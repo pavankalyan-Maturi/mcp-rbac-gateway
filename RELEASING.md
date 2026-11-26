@@ -1,6 +1,6 @@
 # Releasing
 
-The package is published to PyPI as **`mcp-palisade`**. The name `mcp-sentinel` and
+The package is published to PyPI as **`mcp-rbac-gateway`**. The name `mcp-sentinel` and
 names PyPI treats as too similar to it, such as `mcpsentinel-gateway`, belong to other
 projects. The import name `mcp_sentinel` and the `mcp-sentinel`
 command are unchanged.
@@ -16,7 +16,7 @@ name. Normalization removes `.`, `_` and `-`, lowercases, and treats `l`/`i`/`1`
 colliding project can be spelled differently. Run:
 
 ```bash
-python scripts/check_pypi_name.py mcp-palisade
+python scripts/check_pypi_name.py mcp-rbac-gateway
 ```
 
 ## One-time setup
@@ -30,7 +30,7 @@ Do these once, as the repository owner.
 2. **Add a pending publisher on PyPI.** Go to
    [pypi.org/manage/account/publishing](https://pypi.org/manage/account/publishing/) and
    fill in:
-   - PyPI project name: `mcp-palisade`
+   - PyPI project name: `mcp-rbac-gateway`
    - Owner: `pavankalyan-Maturi`
    - Repository name: `mcp-sentinel`
    - Workflow name: `release.yml`
@@ -52,7 +52,7 @@ Open the *Actions* tab, choose **Release**, then **Run workflow** on `main`. Thi
 tests, builds, and uploads to TestPyPI only. Then check the install:
 
 ```bash
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ mcp-palisade
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ mcp-rbac-gateway
 mcp-sentinel --version
 ```
 
