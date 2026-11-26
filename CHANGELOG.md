@@ -2,7 +2,7 @@
 
 ## 0.1.0 - 2026-11-26
 
-First release, published to PyPI as `mcp-sentinel-gateway`.
+First release, published to PyPI as `mcp-rbac-gateway`.
 
 - Policy & RBAC engine: per-agent allow/deny globs, inheritance, argument
   constraints (`pattern`, `deny_pattern`, `max_length`, `allowed_values`, `required`).

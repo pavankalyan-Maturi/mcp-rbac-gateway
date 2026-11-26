@@ -3,7 +3,7 @@
 **A lightweight security, RBAC and audit gateway for Model Context Protocol (MCP) servers and AI agents.**
 
 [![CI](https://github.com/pavankalyan-Maturi/mcp-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/pavankalyan-Maturi/mcp-sentinel/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/mcp-sentinel-gateway)](https://pypi.org/project/mcp-sentinel-gateway/)
+[![PyPI](https://img.shields.io/pypi/v/mcp-rbac-gateway)](https://pypi.org/project/mcp-rbac-gateway/)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)
 ![Typed](https://img.shields.io/badge/typing-strict-success)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -56,15 +56,16 @@ Both paths share the same engine, so a rule behaves the same way whichever route
 ## Install
 
 ```bash
-pip install mcp-sentinel-gateway
+pip install mcp-rbac-gateway
 
 # extras
-pip install "mcp-sentinel-gateway[server]"      # HTTP proxy + approval API (FastAPI, uvicorn)
-pip install "mcp-sentinel-gateway[langgraph]"   # LangGraph example deps
+pip install "mcp-rbac-gateway[server]"      # HTTP proxy + approval API (FastAPI, uvicorn)
+pip install "mcp-rbac-gateway[langgraph]"   # LangGraph example deps
 ```
 
-The package is published as `mcp-sentinel-gateway`, because `mcp-sentinel` on PyPI belongs to
-an unrelated project. You still `import mcp_sentinel` and run the `mcp-sentinel` command.
+The package is published as `mcp-rbac-gateway`, because `mcp-sentinel` and names PyPI treats as
+too similar to it belong to other projects. You still `import mcp_sentinel` and run the
+`mcp-sentinel` command.
 
 Requires Python 3.10+. The core depends only on `pydantic`, `pyyaml`, `rich`, `typer` and `httpx`.
 
