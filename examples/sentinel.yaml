@@ -1,0 +1,54 @@
+# Policy for the examples in this folder.
+version: 1
+default_agent: guest
+default_action: deny
+
+agents:
+  guest:
+    description: Anonymous callers may only search.
+    allow: ["search_web"]
+
+  support-bot:
+    description: Customer-support agent. Reads data, never changes it.
+    inherits: [guest]
+    allow: ["read_file", "lookup_customer", "run_sql"]
+    arguments:
+      read_file:
+        path:
+          pattern: 'docs/.*'
+          deny_pattern: '\.\.'
+      run_sql:
+        query:
+          pattern: '(?is)\s*select\b.*'      # read-only SQL only
+
+  ops-agent:
+    description: Operations agent. Can change data, with a human in the loop.
+    # Inherits from guest, not support-bot: argument constraints are cumulative,
+    # so inheriting support-bot would also inherit its SELECT-only SQL rule.
+    inherits: [guest]
+    allow: ["read_file", "lookup_customer", "run_sql", "write_file", "delete_file"]
+    require_approval: ["delete_file"]
+    arguments:
+      read_file:
+        path:
+          deny_pattern: '\.\.'
+
+scanner:
+  custom_patterns:
+    - name: order_id
+      pattern: 'ORD-\d{8}'
+  prompt_injection:
+    action: block
+    threshold: 0.7
+
+hitl:
+  # The FastAPI example overrides this with its own approval API.
+  mode: auto_deny
+  timeout_seconds: 60
+  rules:
+    - tool: run_sql
+      when: { query: '(?i)\b(drop|delete|truncate|update|alter)\b' }
+      reason: SQL that modifies data
+
+audit:
+  path: .sentinel/examples-audit.db
