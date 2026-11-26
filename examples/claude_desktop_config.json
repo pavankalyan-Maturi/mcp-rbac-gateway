@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "filesystem (guarded)": {
+      "command": "mcp-sentinel",
+      "args": [
+        "wrap",
+        "--config", "/absolute/path/to/sentinel.yaml",
+        "--agent", "support-bot",
+        "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/docs"
+      ]
+    }
+  }
+}
