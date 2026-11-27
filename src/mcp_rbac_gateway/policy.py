@@ -11,6 +11,13 @@ Rules are evaluated in a fixed, easy-to-reason-about order:
 4. **require_approval** - if a ``require_approval`` glob matches, the call is
    allowed only after a human approves it (see :mod:`mcp_rbac_gateway.hitl`).
 
+Other JSON-RPC methods (``tasks/*``, ``skills/*``, ``resources/read`` ...) go
+through :meth:`PolicyEngine.evaluate_method`: ``methods.deny`` wins, then
+``methods.allow``; a method no rule mentions is allowed, so adding the
+``methods`` section never breaks an existing setup. Skills are additionally
+checked by path with :meth:`PolicyEngine.evaluate_skill`, which follows
+``default_action`` like tools do.
+
 Agents that are not listed in the config are evaluated with the policy of
 ``default_agent``. If that agent is not defined either, only
 ``default_action`` applies.
@@ -64,6 +71,10 @@ class EffectivePolicy:
     deny: list[str] = field(default_factory=list)
     require_approval: list[str] = field(default_factory=list)
     arguments: list[tuple[str, dict[str, ArgumentConstraint]]] = field(default_factory=list)
+    method_allow: list[str] = field(default_factory=list)
+    method_deny: list[str] = field(default_factory=list)
+    skill_allow: list[str] = field(default_factory=list)
+    skill_deny: list[str] = field(default_factory=list)
 
 
 class PolicyEngine:
@@ -100,6 +111,10 @@ class PolicyEngine:
         out.deny.extend(agent.deny)
         out.require_approval.extend(agent.require_approval)
         out.arguments.extend(agent.arguments.items())
+        out.method_allow.extend(agent.methods.allow)
+        out.method_deny.extend(agent.methods.deny)
+        out.skill_allow.extend(agent.skills.allow)
+        out.skill_deny.extend(agent.skills.deny)
         for parent in agent.inherits:
             self._flatten(parent, out, seen)
 
@@ -162,6 +177,67 @@ class PolicyEngine:
             rule=f"agents.{who}.allow[{allowed_by}]" if allowed_by else "default_action",
         )
 
+    def evaluate_method(self, agent_id: str | None, method: str) -> PolicyDecision:
+        """Decide whether the agent may send a non-``tools/call`` JSON-RPC request."""
+        policy = self.effective_policy(agent_id)
+        who = policy.agent_id
+        denied_by = match_any(method, policy.method_deny)
+        if denied_by:
+            return PolicyDecision(
+                action=PolicyAction.DENY,
+                reason=f"method '{method}' is denied for agent '{who}'",
+                rule=f"agents.{who}.methods.deny[{denied_by}]",
+            )
+        allowed_by = match_any(method, policy.method_allow)
+        if policy.method_allow and not allowed_by:
+            return PolicyDecision(
+                action=PolicyAction.DENY,
+                reason=f"method '{method}' is not in the methods allowlist for agent '{who}'",
+                rule=f"agents.{who}.methods.allow",
+            )
+        return PolicyDecision(
+            action=PolicyAction.ALLOW,
+            reason="allowed by policy",
+            rule=f"agents.{who}.methods.allow[{allowed_by}]" if allowed_by else "methods.default",
+        )
+
+    def evaluate_skill(self, agent_id: str | None, path: str) -> PolicyDecision:
+        """Decide whether the agent may see or read the skill at ``path``.
+
+        ``path`` is a skill path (``acme/pdf``) or a file inside one
+        (``acme/pdf/scripts/run.py``). Globs are tried against the path and
+        each of its parent directories, so ``skills.deny: ["acme/pdf"]``
+        also covers every file of that skill.
+        """
+        policy = self.effective_policy(agent_id)
+        who = policy.agent_id
+        candidates = _ancestors(path)
+        for candidate in candidates:
+            denied_by = match_any(candidate, policy.skill_deny)
+            if denied_by:
+                return PolicyDecision(
+                    action=PolicyAction.DENY,
+                    reason=f"skill '{path}' is denied for agent '{who}'",
+                    rule=f"agents.{who}.skills.deny[{denied_by}]",
+                )
+        for candidate in candidates:
+            allowed_by = match_any(candidate, policy.skill_allow)
+            if allowed_by:
+                return PolicyDecision(
+                    action=PolicyAction.ALLOW,
+                    reason="allowed by policy",
+                    rule=f"agents.{who}.skills.allow[{allowed_by}]",
+                )
+        if self.config.default_action == "deny":
+            return PolicyDecision(
+                action=PolicyAction.DENY,
+                reason=f"skill '{path}' is not in the skills allowlist for agent '{who}'",
+                rule="default_action",
+            )
+        return PolicyDecision(
+            action=PolicyAction.ALLOW, reason="allowed by policy", rule="default_action"
+        )
+
     def _check_arguments(
         self, policy: EffectivePolicy, tool: str, arguments: Mapping[str, Any]
     ) -> PolicyDecision | None:
@@ -197,3 +273,9 @@ def _violates(
     if constraint.deny_pattern is not None and compile_regex(constraint.deny_pattern).search(text):
         return f"matches forbidden pattern /{constraint.deny_pattern}/"
     return None
+
+
+def _ancestors(path: str) -> list[str]:
+    """``a/b/c`` -> ``["a/b/c", "a/b", "a"]``."""
+    parts = [p for p in path.split("/") if p]
+    return ["/".join(parts[:i]) for i in range(len(parts), 0, -1)] or [path]

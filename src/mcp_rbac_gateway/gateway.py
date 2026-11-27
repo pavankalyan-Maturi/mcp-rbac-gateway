@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from .audit import AuditEvent, AuditLog
 from .config import SentinelConfig, load_config
 from .hitl import ApprovalBroker, ApprovalGate, Approver, approver_from_config
+from .mcp import RequestMeta, TaskRegistry, param_header_map
 from .models import AuditDecision, CallVerdict, Finding, PolicyAction, ScanResult
 from .policy import PolicyEngine
 from .scanner import Scanner
@@ -117,6 +118,8 @@ class Sentinel:
         else:
             self.audit = audit
         self.tool_annotations: dict[str, dict[str, Any]] = {}
+        self.tool_param_headers: dict[str, dict[str, tuple[str, ...]]] = {}
+        self.tasks = TaskRegistry(default_ttl=self.config.tasks.ttl_seconds)
 
     @classmethod
     def from_yaml(cls, path: str | os.PathLike[str], **kwargs: Any) -> Sentinel:
@@ -133,6 +136,11 @@ class Sentinel:
                 self.tool_annotations[name] = (
                     dict(annotations) if isinstance(annotations, dict) else {}
                 )
+                headers = param_header_map(tool.get("inputSchema"))
+                if headers:
+                    self.tool_param_headers[name] = headers
+                else:
+                    self.tool_param_headers.pop(name, None)
 
     def visible_tools(
         self, agent_id: str | None, tools: Iterable[Mapping[str, Any]]
@@ -208,6 +216,77 @@ class Sentinel:
             findings=findings,
         )
 
+    def check_method(
+        self,
+        agent_id: str | None,
+        method: str,
+        target: str,
+        *,
+        skill: str | None = None,
+        scan: Any = None,
+    ) -> CallVerdict:
+        """Policy (and optional input scan) for a JSON-RPC method other than ``tools/call``.
+
+        ``target`` is what the audit trail shows in its ``tool`` column: the
+        skill path, the task's original tool, or the method itself. ``skill``
+        is checked against the agent's ``skills`` rules. ``scan`` is any
+        client-supplied payload (e.g. ``tasks/update`` ``inputResponses``) to
+        redact and, when ``scan_inputs_for_injection`` is on, score.
+        """
+        agent = self.agent_or_default(agent_id)
+        findings: list[Finding] = []
+        safe: dict[str, Any] = {}
+        injection_score = 0.0
+        if scan is not None:
+            result = self.scanner.scan_input({"input": scan})
+            safe = result.payload
+            findings = list(result.findings)
+            injection_score = result.injection_score
+
+        def verdict(decision: AuditDecision, reason: str) -> CallVerdict:
+            return CallVerdict(
+                agent_id=agent,
+                tool=target,
+                method=method,
+                decision=decision,
+                reason=reason,
+                arguments=safe,
+                findings=findings,
+            )
+
+        decision = self.policy.evaluate_method(agent, method)
+        if decision.action is PolicyAction.DENY:
+            return verdict(AuditDecision.BLOCKED_POLICY, f"{decision.reason} ({decision.rule})")
+        if skill is not None:
+            decision = self.policy.evaluate_skill(agent, skill)
+            if decision.action is PolicyAction.DENY:
+                return verdict(AuditDecision.BLOCKED_POLICY, f"{decision.reason} ({decision.rule})")
+        inj = self.config.scanner.prompt_injection
+        if (
+            scan is not None
+            and self.config.scanner.scan_inputs_for_injection
+            and inj.action == "block"
+            and self.scanner.is_injection(injection_score)
+        ):
+            return verdict(
+                AuditDecision.BLOCKED_INJECTION,
+                f"possible prompt injection in {method} input (score {injection_score:.2f})",
+            )
+        return verdict(AuditDecision.ALLOWED, f"{decision.reason} ({decision.rule})")
+
+    def visible_skills(
+        self, agent_id: str | None, skills: Iterable[Mapping[str, Any]]
+    ) -> list[Mapping[str, Any]]:
+        """Drop ``skills/list`` entries the agent may not read."""
+        from .mcp import skill_path
+
+        out = []
+        for entry in skills:
+            path = skill_path(str(entry.get("uri", "")))
+            if path is None or self.policy.evaluate_skill(agent_id, path).allowed:
+                out.append(entry)
+        return out
+
     def check_result(self, result: Any) -> ResultCheck:
         """Redact and score a tool result."""
         scan: ScanResult = self.scanner.scan_output(result)
@@ -246,9 +325,14 @@ class Sentinel:
         result: Any = None,
         result_check: ResultCheck | None = None,
         is_error: bool = False,
+        meta: RequestMeta | None = None,
     ) -> None:
         if self.audit is None:
             return
+        meta = meta or RequestMeta()
+        safe_meta = None
+        if meta.raw:
+            safe_meta = self.scanner.redact(meta.raw, direction="input").payload
         findings = list(verdict.findings)
         injection_score = 0.0
         if result_check is not None:
@@ -269,6 +353,13 @@ class Sentinel:
             findings=findings,
             injection_score=injection_score,
             is_error=is_error,
+            method=verdict.method,
+            protocol_version=meta.protocol_version,
+            client_name=meta.client_name,
+            client_version=meta.client_version,
+            traceparent=meta.traceparent,
+            tracestate=meta.tracestate,
+            meta=safe_meta,
         )
         try:
             await self.audit.record(event)

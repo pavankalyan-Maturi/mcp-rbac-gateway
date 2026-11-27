@@ -82,10 +82,11 @@ class CallVerdict(BaseModel):
     """Everything sentinel decided about one tool call *before* it runs."""
 
     agent_id: str
-    tool: str
+    tool: str = Field(description="Tool name, or the target of another method (skill, task).")
     decision: AuditDecision
     reason: str
     arguments: dict[str, Any] = Field(description="Arguments to forward (possibly redacted).")
+    method: str = "tools/call"
     findings: list[Finding] = Field(default_factory=list)
     approver: str | None = None
 

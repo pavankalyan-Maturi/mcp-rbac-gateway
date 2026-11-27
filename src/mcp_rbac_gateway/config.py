@@ -23,8 +23,10 @@ __all__ = [
     "CustomPattern",
     "HitlConfig",
     "InjectionConfig",
+    "NameRules",
     "ScannerConfig",
     "SentinelConfig",
+    "TasksConfig",
     "UpstreamConfig",
     "WebhookConfig",
     "load_config",
@@ -61,6 +63,20 @@ class ArgumentConstraint(_Strict):
     _check = field_validator("pattern", "deny_pattern")(_check_regex)
 
 
+class NameRules(_Strict):
+    """Allow/deny globs for something other than tool names (methods, skills)."""
+
+    allow: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+
+    @field_validator("allow", "deny", mode="before")
+    @classmethod
+    def _coerce_list(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return [value]
+        return value
+
+
 class AgentPolicy(_Strict):
     """RBAC policy for one agent identity."""
 
@@ -74,6 +90,16 @@ class AgentPolicy(_Strict):
     arguments: dict[str, dict[str, ArgumentConstraint]] = Field(
         default_factory=dict,
         description="Map of tool glob -> argument name -> constraint.",
+    )
+    methods: NameRules = Field(
+        default_factory=NameRules,
+        description="Globs of JSON-RPC methods other than tools/call (e.g. 'tasks/*', "
+        "'skills/get'). Deny wins; a method no rule mentions is allowed.",
+    )
+    skills: NameRules = Field(
+        default_factory=NameRules,
+        description="Globs of skill paths (skill://<path>/SKILL.md). A skill no rule "
+        "mentions follows default_action.",
     )
     token_env: str | None = Field(
         default=None,
@@ -196,6 +222,19 @@ class AuditConfig(_Strict):
     max_payload_chars: int = Field(default=4000, ge=0)
 
 
+class TasksConfig(_Strict):
+    """Handling of the ``io.modelcontextprotocol/tasks`` extension."""
+
+    bind_to_agent: bool = Field(
+        default=True,
+        description="Only the agent whose tools/call created a task may get, update or "
+        "cancel it. Unknown task ids are refused.",
+    )
+    ttl_seconds: float = Field(
+        default=3600.0, gt=0, description="How long the gateway remembers a task."
+    )
+
+
 class UpstreamConfig(_Strict):
     """The real MCP server that sentinel protects."""
 
@@ -226,6 +265,7 @@ class SentinelConfig(_Strict):
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
     hitl: HitlConfig = Field(default_factory=HitlConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    tasks: TasksConfig = Field(default_factory=TasksConfig)
     upstream: UpstreamConfig = Field(default_factory=UpstreamConfig)
 
     @model_validator(mode="after")

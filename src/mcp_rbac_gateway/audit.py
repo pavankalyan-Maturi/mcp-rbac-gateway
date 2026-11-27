@@ -55,6 +55,21 @@ CREATE INDEX IF NOT EXISTS idx_events_tool ON events (tool, ts);
 CREATE INDEX IF NOT EXISTS idx_events_decision ON events (decision, ts);
 """
 
+# Columns added after 0.1.x. Older databases are upgraded in place.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("method", "TEXT NOT NULL DEFAULT 'tools/call'"),
+    ("protocol_version", "TEXT"),
+    ("client_name", "TEXT"),
+    ("client_version", "TEXT"),
+    ("traceparent", "TEXT"),
+    ("tracestate", "TEXT"),
+    ("meta", "TEXT"),
+)
+_ADDED_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_events_trace ON events (traceparent)",
+    "CREATE INDEX IF NOT EXISTS idx_events_method ON events (method, ts)",
+)
+
 
 class AuditEvent(BaseModel):
     id: int | None = None
@@ -73,6 +88,15 @@ class AuditEvent(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
     injection_score: float = 0.0
     is_error: bool = False
+    method: str = "tools/call"
+    protocol_version: str | None = None
+    client_name: str | None = None
+    client_version: str | None = None
+    traceparent: str | None = None
+    tracestate: str | None = None
+    meta: dict[str, Any] | None = Field(
+        default=None, description="The request's params._meta, after redaction."
+    )
 
     @property
     def redactions(self) -> int:
@@ -137,7 +161,16 @@ class AuditLog:
             if str(self.path) != ":memory:":
                 self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        have = {row[1] for row in self._conn.execute("PRAGMA table_info(events)")}
+        for name, ddl in _ADDED_COLUMNS:
+            if name not in have:
+                self._conn.execute(f"ALTER TABLE events ADD COLUMN {name} {ddl}")
+        for sql in _ADDED_INDEXES:
+            self._conn.execute(sql)
 
     @classmethod
     def from_config(cls, config: AuditConfig) -> AuditLog:
@@ -160,12 +193,15 @@ class AuditLog:
         args = _truncate(event.arguments, limit) if self.config.log_arguments else None
         result = _truncate(event.result, limit) if self.config.log_results else None
         findings = json.dumps([f.model_dump(exclude_none=True) for f in event.findings])
+        meta = _truncate(event.meta, limit) if event.meta else None
         with self._cursor() as cur:
             cur.execute(
                 """INSERT INTO events (ts, agent_id, tool, decision, reason, latency_ms,
                    transport, request_id, session_id, approver, arguments, result, findings,
-                   redactions, injection_score, is_error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   redactions, injection_score, is_error, method, protocol_version,
+                   client_name, client_version, traceparent, tracestate, meta)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event.ts,
                     event.agent_id,
@@ -183,6 +219,13 @@ class AuditLog:
                     event.redactions,
                     event.injection_score,
                     int(event.is_error),
+                    event.method,
+                    event.protocol_version,
+                    event.client_name,
+                    event.client_version,
+                    event.traceparent,
+                    event.tracestate,
+                    meta,
                 ),
             )
             row_id = cur.lastrowid
@@ -203,8 +246,20 @@ class AuditLog:
         since: float | None = None,
         blocked_only: bool = False,
         limit: int = 100,
+        method: str | None = None,
+        trace_id: str | None = None,
     ) -> list[AuditEvent]:
+        """Most recent events first. ``trace_id`` matches the W3C trace id in ``traceparent``."""
         sql, params = self._where(agent_id, tool, decision, since, blocked_only)
+        extra: list[str] = []
+        if method:
+            extra.append("method = ?")
+            params.append(method)
+        if trace_id:
+            extra.append("traceparent LIKE ?")
+            params.append(f"__-{trace_id}-%")
+        if extra:
+            sql = (sql + " AND " if sql else "WHERE ") + " AND ".join(extra)
         rows = self._fetch(
             f"SELECT * FROM events {sql} ORDER BY ts DESC, id DESC LIMIT ?",
             [
@@ -349,4 +404,15 @@ class AuditLog:
             findings=[Finding.model_validate(f) for f in (load(row["findings"]) or [])],
             injection_score=row["injection_score"],
             is_error=bool(row["is_error"]),
+            method=row["method"],
+            protocol_version=row["protocol_version"],
+            client_name=row["client_name"],
+            client_version=row["client_version"],
+            traceparent=row["traceparent"],
+            tracestate=row["tracestate"],
+            meta=_as_dict(load(row["meta"])),
         )
+
+
+def _as_dict(value: Any) -> dict[str, Any] | None:
+    return value if isinstance(value, dict) else None

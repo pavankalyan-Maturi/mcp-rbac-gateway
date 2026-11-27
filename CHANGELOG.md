@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.0 - 2026-11-27
+
+Support for the stateless MCP revision
+[2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/changelog).
+
+- **`mcp-rbac-gateway proxy-http`** (`StatelessHttpProxy`): a reverse proxy for stateless
+  Streamable HTTP. It needs no `initialize` and no `Mcp-Session-Id`.
+  - It checks `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` against the body before
+    forwarding, and answers `400` with `-32020` (HeaderMismatch) or `-32022` (unsupported
+    version) when they disagree.
+  - It keeps `Mcp-Param-*` headers in step with redacted arguments.
+  - It rejects batches, and answers `GET` and `DELETE` with `405`.
+- **`_meta` preserved and audited** in stdio and HTTP modes. New audit columns: `method`,
+  `protocol_version`, `client_name`, `client_version`, `traceparent`, `tracestate` and
+  `meta`. Existing audit databases are upgraded in place.
+  `AuditLog.query(method=..., trace_id=...)`.
+- **Tasks extension:** a task is tied to the agent that created it, and task results are
+  redacted and checked for injection. `tasks/update` input is redacted. Results are audited
+  against the original tool.
+- **Skills extension:** `skills/list` is filtered per agent. `skills/get` and `skill://`
+  resource reads are checked against the new `agents.<name>.skills` rules, and skill content
+  is scanned for prompt injection.
+- **New config:** `agents.<name>.methods` (allow/deny globs for any non-`tools/call`
+  method), `agents.<name>.skills`, and a top-level `tasks` section.
+- Locally generated tool errors carry `resultType: "complete"` for 2026-07-28 requests.
+- `validate` shows the methods and skills rules.
+
 ## 0.1.1 - 2026-11-26
 
 **Breaking: the import and command names changed** to match the PyPI package.

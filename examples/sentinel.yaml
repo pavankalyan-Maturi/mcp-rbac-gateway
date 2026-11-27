@@ -20,6 +20,10 @@ agents:
       run_sql:
         query:
           pattern: '(?is)\s*select\b.*'      # read-only SQL only
+    skills:
+      allow: ["support/*"]           # MCP skills: skill://support/<name>/SKILL.md
+    methods:
+      deny: ["tasks/cancel"]         # may poll long-running tool calls, not cancel them
 
   ops-agent:
     description: Operations agent. Can change data, with a human in the loop.

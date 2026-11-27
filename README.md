@@ -26,8 +26,9 @@ agent ──► mcp-rbac-gateway ──► MCP server / Python tool
 
 It works in two ways:
 
-- **As a proxy** in front of any MCP server, over stdio, Streamable HTTP or legacy
-  SSE. You don't change the server or the client.
+- **As a proxy** in front of any MCP server, over stdio, Streamable HTTP (including
+  the stateless [2026-07-28 revision](#stateless-mcp-2026-07-28)) or legacy SSE. You
+  don't change the server or the client.
 - **As a Python decorator** (`@guard`) on LangGraph, LangChain, FastAPI or plain
   async functions.
 
@@ -44,6 +45,7 @@ Both paths share the same engine, so a rule behaves the same way whichever route
 - [Policy & RBAC](#policy--rbac)
 - [Security scanner](#security-scanner)
 - [Human-in-the-loop approvals](#human-in-the-loop-approvals)
+- [Stateless MCP (2026-07-28)](#stateless-mcp-2026-07-28)
 - [Python API & decorator](#python-api--decorator)
 - [Audit trail & dashboard](#audit-trail--dashboard)
 - [CLI reference](#cli-reference)
@@ -113,6 +115,9 @@ For HTTP servers:
 ```bash
 mcp-rbac-gateway serve --config sentinel.yaml --upstream-url http://localhost:8000/mcp --port 8765
 # clients connect to http://localhost:8765/mcp (or /sse for legacy SSE clients)
+
+# MCP 2026-07-28 (stateless: no initialize, no Mcp-Session-Id)
+mcp-rbac-gateway proxy-http --config sentinel.yaml --upstream-url http://localhost:8000/mcp
 ```
 
 ### 2b. Or guard Python tools directly
@@ -170,6 +175,7 @@ flowchart LR
         direction TB
         T1["StdioProxy<br/>mcp-rbac-gateway wrap"]
         T2["HttpProxy<br/>Streamable HTTP + SSE"]
+        T4["StatelessHttpProxy<br/>MCP 2026-07-28"]
         T3["@guard decorator"]
         I["MessageInterceptor<br/>JSON-RPC inspection"]
         S["Sentinel engine"]
@@ -179,6 +185,7 @@ flowchart LR
         AU[("AuditLog<br/>SQLite")]
         T1 --> I
         T2 --> I
+        T4 --> I
         I --> S
         T3 --> S
         S --> P
@@ -195,6 +202,7 @@ flowchart LR
 
     A1 --> T1 --> U1
     A1 --> T2 --> U2
+    A1 --> T4 --> U2
     A2 --> T3 --> U3
     A3 --> T3
     H -.->|"prompt"| Human(("Human"))
@@ -276,6 +284,8 @@ from the environment.
 | `agents.<name>.inherits` | `[]` | Parent agents whose rules are merged in. |
 | `agents.<name>.require_approval` | `[]` | Tool globs that need a human. |
 | `agents.<name>.arguments.<tool-glob>.<arg>` | - | `pattern`, `deny_pattern`, `max_length`, `allowed_values`, `required`. |
+| `agents.<name>.methods.allow` / `deny` | `[]` | Globs of JSON-RPC methods other than `tools/call` (`tasks/*`, `skills/get`, `prompts/get` ...). Deny wins. With no `allow` list, unmentioned methods are allowed. |
+| `agents.<name>.skills.allow` / `deny` | `[]` | Globs of skill paths (`skill://<path>/SKILL.md`). Unmentioned skills follow `default_action`. |
 | `agents.<name>.token_env` | - | Env var holding this agent's token for the HTTP proxy. |
 | `scanner.redact_inputs` / `redact_outputs` | `true` | Redact tool arguments / results. |
 | `scanner.input_detectors` | secrets only | Detectors applied to arguments. |
@@ -292,7 +302,9 @@ from the environment.
 | `hitl.webhook` | - | `url`, `headers`, `callback_base_url`, `token_env`. |
 | `audit.path` | `.sentinel/audit.db` | SQLite file. |
 | `audit.log_arguments` / `log_results` | `true` / `false` | What to store (always after redaction). |
-| `upstream.command` / `url` | - | Default upstream for `wrap` / `serve`. |
+| `tasks.bind_to_agent` | `true` | Only the agent whose `tools/call` created a task may get, update or cancel it. |
+| `tasks.ttl_seconds` | `3600` | How long the gateway remembers which agent owns a task. |
+| `upstream.command` / `url` | - | Default upstream for `wrap` / `serve` / `proxy-http`. |
 
 The full annotated example is in [`examples/sentinel.yaml`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/examples/sentinel.yaml), and
 `mcp-rbac-gateway init` writes another one.
@@ -435,6 +447,77 @@ class SlackApprover:
 sentinel = Sentinel.from_yaml("sentinel.yaml", approver=SlackApprover())
 ```
 
+## Stateless MCP (2026-07-28)
+
+The [2026-07-28 revision](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+of MCP removes the `initialize` handshake and `Mcp-Session-Id`. Every request carries its
+protocol version and client info in `params._meta`, and Streamable HTTP requests carry
+routing headers so that load balancers can route without parsing the body.
+`mcp-rbac-gateway proxy-http` is a reverse proxy for that transport:
+
+```bash
+mcp-rbac-gateway proxy-http -c sentinel.yaml --upstream-url http://localhost:8000/mcp --port 8765
+```
+
+**Header checks.** Before anything is forwarded, the proxy checks the headers against the body
+and answers `400` with a JSON-RPC error when they disagree. Policy is then decided on the
+body. A router that trusts `Mcp-Name: echo` can't be used to slip a `delete_file` call past
+the gateway.
+
+| Header | Rule | Error |
+| --- | --- | --- |
+| `MCP-Protocol-Version` | required, a supported version, equal to `_meta["io.modelcontextprotocol/protocolVersion"]` | `-32022` / `-32020` |
+| `Mcp-Method` | required, equal to the JSON-RPC `method` | `-32020` |
+| `Mcp-Name` | required for `tools/call`, `prompts/get` (`params.name`), `resources/read` (`params.uri`) and `tasks/get\|update\|cancel` (`params.taskId`); `=?base64?…?=` values are decoded | `-32020` |
+| `Mcp-Param-*` | forwarded. When redaction changes an argument that the tool's `inputSchema` mirrors with `x-mcp-header`, the header is rewritten to match | - |
+
+The proxy also strips any `Mcp-Session-Id`, rejects JSON-RPC batches (send one message per
+POST), and answers `GET` and `DELETE` with `405`. Keep using `serve` for 2025-era clients
+and servers.
+
+**`_meta` is preserved and audited.** Only `params.arguments` is ever rewritten (by redaction).
+`_meta` reaches the server exactly as the client sent it, in every transport. The audit
+trail stores `method`, `protocol_version`, `client_name`, `client_version`, `traceparent`,
+`tracestate` and the full `_meta` (after redaction), so you can find a gateway decision from a
+trace id:
+
+```python
+AuditLog(".sentinel/audit.db").query(trace_id="0af7651916cd43dd8448eb211c80319c")
+```
+
+`clientInfo` is self-reported, so it is recorded but never used for identity. Identity
+still comes from `--agent`, `X-Sentinel-Agent` or `X-Sentinel-Token`.
+
+**Tasks** ([`io.modelcontextprotocol/tasks`](https://modelcontextprotocol.io/extensions/tasks/overview)).
+When a `tools/call` returns `resultType: "task"`, the gateway remembers which agent and tool
+created it.
+- `tasks/get`, `tasks/update` and `tasks/cancel` carry only a `taskId`, and they are refused
+  (`-32602`, as for an unknown task) unless the same agent created it. This is
+  `tasks.bind_to_agent`.
+- Task results get the same redaction and injection check as tool results. A poisoned
+  result is replaced with an error. Polls of a running task aren't audited one by one; the
+  final state is, and its row is attributed to the original tool.
+- `tasks/update` `inputResponses` are redacted before they reach the server.
+
+The task map lives in memory. Behind several gateway replicas, route on `Mcp-Name` so that
+polls reach the replica that saw the task, or set `bind_to_agent: false`.
+
+**Skills** ([`io.modelcontextprotocol/skills`](https://modelcontextprotocol.io/extensions/skills/overview)).
+`skills/list` is filtered per agent, like `tools/list`. `skills/get`, `resources/read` and
+`resources/directory/read` on `skill://` URIs need a matching `skills` rule. Skill content
+is scanned for prompt injection before the model sees it.
+
+```yaml
+agents:
+  researcher:
+    allow: ["search_*"]
+    skills:
+      allow: ["pdf-processing", "acme/*"]   # globs on skill://<path>/SKILL.md
+      deny: ["acme/internal"]               # also covers every file under it
+    methods:
+      deny: ["tasks/cancel"]                # this agent may poll tasks but not cancel them
+```
+
 ## Python API & decorator
 
 ```python
@@ -472,7 +555,9 @@ Every call produces one row in SQLite (WAL mode, so `report` can read while a pr
 | --- | --- |
 | `ts`, `agent_id`, `tool`, `decision`, `reason` | what happened and why (including the rule that matched) |
 | `latency_ms` | end-to-end time, including any approval wait |
-| `transport`, `request_id`, `session_id` | `stdio` / `http` / `sse` / `python` |
+| `transport`, `request_id`, `session_id` | `stdio` / `http` / `http-stateless` / `sse` / `python` |
+| `method` | `tools/call`, or `tasks/get`, `skills/get`, `resources/read` ... |
+| `protocol_version`, `client_name`, `client_version`, `traceparent`, `tracestate`, `meta` | from the request's `params._meta` |
 | `approver` | who approved or denied |
 | `arguments`, `result` | after redaction; `result` only with `log_results: true` |
 | `findings`, `redactions`, `injection_score` | what the scanner found (never the secret itself) |
@@ -492,6 +577,7 @@ Or query it from Python with `AuditLog(path).query(blocked_only=True)` and `.sum
 | --- | --- |
 | `mcp-rbac-gateway wrap -c CFG [--agent A] [--approval-port P] -- CMD…` | stdio proxy around an MCP server process |
 | `mcp-rbac-gateway serve -c CFG --upstream-url URL [--port 8765]` | HTTP proxy (Streamable HTTP at `/mcp`, legacy SSE at `/sse`) with the approval API |
+| `mcp-rbac-gateway proxy-http -c CFG --upstream-url URL [--port 8765]` | stateless Streamable HTTP proxy for MCP 2026-07-28, with the approval API |
 | `mcp-rbac-gateway report [--db DB] [--since 24h] [--agent A] [--json] [--watch N]` | Rich dashboard |
 | `mcp-rbac-gateway validate -c CFG` | validate the config and print effective policies |
 | `mcp-rbac-gateway check TOOL 'JSON' -a AGENT` | dry-run one decision (exit code 1 if denied) |
@@ -528,7 +614,7 @@ mcp-rbac-gateway is **defence in depth**, not a sandbox.
   `X-Sentinel-Token`; the `X-Sentinel-Agent` header alone is then ignored.
 - **Fail closed.** Unknown agents get `default_agent`. Unknown tools are denied by
   default. Approval errors and timeouts block the call.
-- JSON-RPC batches are inspected item by item. Messages the proxy doesn't need to
+- JSON-RPC batches are inspected item by item (`serve`, `wrap`); `proxy-http` rejects them. Messages the proxy doesn't need to
   understand pass through unchanged.
 
 See [SECURITY.md](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/SECURITY.md) for how to report a vulnerability.
