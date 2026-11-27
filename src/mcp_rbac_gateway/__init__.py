@@ -6,6 +6,7 @@ __version__ = "0.2.0"
 
 from .audit import AuditEvent, AuditLog
 from .config import SentinelConfig, load_config
+from .context import CallContext, call_context, current_call_context
 from .gateway import ResultCheck, Sentinel, ToolBlockedError, agent_context, current_agent
 from .hitl import (
     ApprovalBroker,
@@ -35,6 +36,7 @@ __all__ = [
     "AuditEvent",
     "AuditLog",
     "AutoApprover",
+    "CallContext",
     "CLIApprover",
     "CallVerdict",
     "CallbackApprover",
@@ -57,8 +59,10 @@ __all__ = [
     "WebhookApprover",
     "__version__",
     "agent_context",
+    "call_context",
     "create_approval_router",
     "current_agent",
+    "current_call_context",
     "guard",
     "load_config",
 ]

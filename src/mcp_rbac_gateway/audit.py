@@ -64,10 +64,15 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("traceparent", "TEXT"),
     ("tracestate", "TEXT"),
     ("meta", "TEXT"),
+    ("tenant_id", "TEXT"),
+    ("labels", "TEXT"),
 )
 _ADDED_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_events_trace ON events (traceparent)",
     "CREATE INDEX IF NOT EXISTS idx_events_method ON events (method, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_events_tenant ON events (tenant_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_events_session ON events (session_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_events_request ON events (request_id)",
 )
 
 
@@ -97,6 +102,8 @@ class AuditEvent(BaseModel):
     meta: dict[str, Any] | None = Field(
         default=None, description="The request's params._meta, after redaction."
     )
+    tenant_id: str | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
 
     @property
     def redactions(self) -> int:
@@ -199,9 +206,10 @@ class AuditLog:
                 """INSERT INTO events (ts, agent_id, tool, decision, reason, latency_ms,
                    transport, request_id, session_id, approver, arguments, result, findings,
                    redactions, injection_score, is_error, method, protocol_version,
-                   client_name, client_version, traceparent, tracestate, meta)
+                   client_name, client_version, traceparent, tracestate, meta,
+                   tenant_id, labels)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event.ts,
                     event.agent_id,
@@ -226,6 +234,8 @@ class AuditLog:
                     event.traceparent,
                     event.tracestate,
                     meta,
+                    event.tenant_id,
+                    json.dumps(event.labels) if event.labels else None,
                 ),
             )
             row_id = cur.lastrowid
@@ -411,6 +421,8 @@ class AuditLog:
             traceparent=row["traceparent"],
             tracestate=row["tracestate"],
             meta=_as_dict(load(row["meta"])),
+            tenant_id=row["tenant_id"],
+            labels=_as_dict(load(row["labels"])) or {},
         )
 
 

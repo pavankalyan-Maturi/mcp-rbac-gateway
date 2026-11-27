@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from .audit import AuditEvent, AuditLog
 from .config import SentinelConfig, load_config
+from .context import CallContext, current_call_context
 from .hitl import ApprovalBroker, ApprovalGate, Approver, approver_from_config
 from .mcp import RequestMeta, TaskRegistry, param_header_map
 from .models import AuditDecision, CallVerdict, Finding, PolicyAction, ScanResult
@@ -146,6 +147,12 @@ class Sentinel:
         self, agent_id: str | None, tools: Iterable[Mapping[str, Any]]
     ) -> list[Mapping[str, Any]]:
         return self.policy.filter_tools(agent_id, tools)
+
+    @staticmethod
+    def resolve_context(context: CallContext | None = None) -> CallContext:
+        """``context`` if given, else the bound :func:`call_context`, with OTel trace filled in."""
+        ctx = context or current_call_context() or CallContext()
+        return ctx.with_trace()
 
     def agent_or_default(self, agent_id: str | None) -> str:
         return agent_id or current_agent() or self.config.default_agent
@@ -326,9 +333,16 @@ class Sentinel:
         result_check: ResultCheck | None = None,
         is_error: bool = False,
         meta: RequestMeta | None = None,
+        context: CallContext | None = None,
     ) -> None:
+        """Write one audit row.
+
+        ``session_id`` and ``request_id`` given here win over ``context``;
+        ``context`` defaults to the one bound with :func:`call_context`.
+        """
         if self.audit is None:
             return
+        ctx = context or current_call_context() or CallContext()
         meta = meta or RequestMeta()
         safe_meta = None
         if meta.raw:
@@ -345,8 +359,8 @@ class Sentinel:
             reason=reason or verdict.reason,
             latency_ms=round(latency_ms, 3) if latency_ms is not None else None,
             transport=transport,
-            request_id=None if request_id is None else str(request_id),
-            session_id=session_id,
+            request_id=str(request_id) if request_id is not None else ctx.request_id,
+            session_id=session_id if session_id is not None else ctx.session_id,
             approver=verdict.approver,
             arguments=verdict.arguments,
             result=result,
@@ -357,9 +371,11 @@ class Sentinel:
             protocol_version=meta.protocol_version,
             client_name=meta.client_name,
             client_version=meta.client_version,
-            traceparent=meta.traceparent,
+            traceparent=meta.traceparent or ctx.traceparent,
             tracestate=meta.tracestate,
             meta=safe_meta,
+            tenant_id=ctx.tenant_id,
+            labels=dict(ctx.labels),
         )
         try:
             await self.audit.record(event)
@@ -376,12 +392,16 @@ class Sentinel:
         *,
         agent_id: str | None = None,
         transport: str = "python",
+        context: CallContext | None = None,
     ) -> T:
         """Guard an arbitrary async callable end to end.
 
         ``fn`` receives the (possibly redacted) arguments. Raises
         :class:`ToolBlockedError` when the call or its output is blocked.
+        ``context`` (default: the one bound with :func:`call_context`) is
+        written to every audit row this call produces.
         """
+        ctx = self.resolve_context(context)
         started = time.perf_counter()
         verdict = await self.check_call(agent_id, tool, arguments)
         if not verdict.allowed:
@@ -389,6 +409,7 @@ class Sentinel:
                 verdict,
                 latency_ms=(time.perf_counter() - started) * 1000,
                 transport=transport,
+                context=ctx,
             )
             raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
         try:
@@ -401,6 +422,7 @@ class Sentinel:
                 latency_ms=(time.perf_counter() - started) * 1000,
                 transport=transport,
                 is_error=True,
+                context=ctx,
             )
             raise
         check = self.check_result(result)
@@ -413,6 +435,7 @@ class Sentinel:
                 latency_ms=latency,
                 transport=transport,
                 result_check=check,
+                context=ctx,
             )
             raise ToolBlockedError(
                 verdict, check.reason or "blocked", AuditDecision.BLOCKED_INJECTION
@@ -423,6 +446,7 @@ class Sentinel:
             transport=transport,
             result=check.payload,
             result_check=check,
+            context=ctx,
         )
         return check.payload  # type: ignore[no-any-return]
 
@@ -433,11 +457,12 @@ class Sentinel:
         tool: str | None = None,
         agent_id: str | None = None,
         on_block: OnBlock = "raise",
+        context: CallContext | None = None,
     ) -> Any:
         """Decorator form of :meth:`call`. See :func:`mcp_rbac_gateway.proxy.guard`."""
         from .proxy import guard
 
-        decorator = guard(self, tool=tool, agent_id=agent_id, on_block=on_block)
+        decorator = guard(self, tool=tool, agent_id=agent_id, on_block=on_block, context=context)
         return decorator(fn) if fn is not None else decorator
 
     def close(self) -> None:

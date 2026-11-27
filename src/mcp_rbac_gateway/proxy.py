@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import urljoin
 
+from .context import CallContext
 from .gateway import ResultCheck, Sentinel, ToolBlockedError
 from .mcp import (
     HEADER_MISMATCH,
@@ -1305,6 +1306,7 @@ def guard(
     tool: str | None = None,
     agent_id: str | None = None,
     on_block: OnBlock = "raise",
+    context: CallContext | None = None,
 ) -> Callable[[F], F]:
     """Protect a Python tool function with the full sentinel pipeline.
 
@@ -1323,6 +1325,9 @@ def guard(
         on_block: ``"raise"`` raises :class:`ToolBlockedError`; ``"return"``
             returns a ``"[mcp-rbac-gateway] ..."`` string the LLM can read and
             recover from, which is usually what agent frameworks want.
+        context: Fixed :class:`CallContext` for every call. When omitted, the
+            context bound with :func:`mcp_rbac_gateway.call_context` at call
+            time is used.
     """
 
     def decorator(fn: F) -> F:
@@ -1388,7 +1393,9 @@ def guard(
                     return await fn(*a, **k)
 
                 try:
-                    return await sentinel.call(name, visible, run, agent_id=agent_id)
+                    return await sentinel.call(
+                        name, visible, run, agent_id=agent_id, context=context
+                    )
                 except ToolBlockedError as exc:
                     return blocked(exc)
 
@@ -1403,7 +1410,7 @@ def guard(
                 return await asyncio.to_thread(fn, *a, **k)
 
             async def main() -> Any:
-                return await sentinel.call(name, visible, run, agent_id=agent_id)
+                return await sentinel.call(name, visible, run, agent_id=agent_id, context=context)
 
             try:
                 return _run_sync(main)
