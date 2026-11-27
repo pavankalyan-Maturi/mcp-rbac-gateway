@@ -204,7 +204,8 @@ class HitlConfig(_Strict):
     mode: Literal["cli", "webhook", "api", "auto_approve", "auto_deny"] = Field(
         default="cli",
         description="Who decides: cli (terminal prompt), webhook (POST + approval API), api "
-        "(approval API only), auto_approve, auto_deny.",
+        "(approval API only), auto_approve, auto_deny. When your app mounts the approval "
+        "router, use api or webhook; auto_deny never waits for it.",
     )
     store: Literal["memory", "sqlite"] = Field(
         default="memory",
@@ -232,6 +233,21 @@ class AuditConfig(_Strict):
     log_arguments: bool = True
     log_results: bool = False
     max_payload_chars: int = Field(default=4000, ge=0)
+    writer: Literal["sync", "batched"] = Field(
+        default="sync",
+        description="sync: one committed transaction per row (0.2 behaviour). batched: rows go "
+        "to a bounded queue and a background thread writes them in batches.",
+    )
+    batch_size: int = Field(default=100, ge=1, description="batched: rows per transaction.")
+    flush_interval_ms: float = Field(
+        default=50.0, gt=0, description="batched: longest a row waits before being written."
+    )
+    queue_size: int = Field(
+        default=10_000,
+        ge=1,
+        description="batched: rows that may wait. When full, writers block (rows are never "
+        "dropped).",
+    )
 
 
 class TasksConfig(_Strict):

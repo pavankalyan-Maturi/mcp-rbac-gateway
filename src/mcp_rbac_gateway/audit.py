@@ -9,6 +9,14 @@ Writes run in a worker thread (``asyncio.to_thread``) so the event loop is
 never blocked by disk I/O. The database uses WAL mode, which lets
 ``mcp-rbac-gateway report`` read while a proxy is writing.
 
+With ``audit.writer: batched`` a call does not wait for its row to be
+committed: rows go to a bounded queue and one background thread writes them
+in batches (``batch_size`` rows or every ``flush_interval_ms``). The queue
+blocks when full, so rows are never dropped. Reads through this
+:class:`AuditLog` flush first, so they always see earlier writes;
+:meth:`AuditLog.close` (and :meth:`Sentinel.close`) flush too. Rows still
+queued when the process is killed are lost, which is the tradeoff.
+
 Schema contract
 ---------------
 From 0.3.0 the ``events`` table is a **public, versioned schema**. Its
@@ -34,6 +42,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import queue
 import sqlite3
 import threading
 import time
@@ -195,6 +205,18 @@ def _percentile(values: list[float], pct: float) -> float | None:
     return round(ordered[k], 2)
 
 
+logger = logging.getLogger("mcp_rbac_gateway.audit")
+_FLUSH = object()  # queue marker: write what you have now
+
+_INSERT = """INSERT INTO events (ts, agent_id, tool, decision, reason, latency_ms,
+                   transport, request_id, session_id, approver, arguments, result, findings,
+                   redactions, injection_score, is_error, method, protocol_version,
+                   client_name, client_version, traceparent, tracestate, meta,
+                   tenant_id, labels, approval_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+
 class AuditLog:
     """Append-only audit store backed by SQLite."""
 
@@ -212,6 +234,15 @@ class AuditLog:
             self._conn.executescript(_SCHEMA)
             self._migrate()
             self._conn.commit()
+        self._queue: queue.Queue[Any] | None = None
+        self._writer: threading.Thread | None = None
+        self._writer_error: BaseException | None = None
+        if self.config.writer == "batched":
+            self._queue = queue.Queue(maxsize=self.config.queue_size)
+            self._writer = threading.Thread(
+                target=self._drain, name="mcp-rbac-gateway-audit", daemon=True
+            )
+            self._writer.start()
 
     def _migrate(self) -> None:
         version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
@@ -250,56 +281,109 @@ class AuditLog:
 
     # ----------------------------------------------------------------- writes
 
-    def record_sync(self, event: AuditEvent) -> int:
+    def _row(self, event: AuditEvent) -> tuple[Any, ...]:
         limit = self.config.max_payload_chars
         args = _truncate(event.arguments, limit) if self.config.log_arguments else None
         result = _truncate(event.result, limit) if self.config.log_results else None
         findings = json.dumps([f.model_dump(exclude_none=True) for f in event.findings])
         meta = _truncate(event.meta, limit) if event.meta else None
+        return (
+            event.ts,
+            event.agent_id,
+            event.tool,
+            event.decision.value,
+            event.reason,
+            event.latency_ms,
+            event.transport,
+            event.request_id,
+            event.session_id,
+            event.approver,
+            args,
+            result,
+            findings,
+            event.redactions,
+            event.injection_score,
+            int(event.is_error),
+            event.method,
+            event.protocol_version,
+            event.client_name,
+            event.client_version,
+            event.traceparent,
+            event.tracestate,
+            meta,
+            event.tenant_id,
+            json.dumps(event.labels) if event.labels else None,
+            event.approval_id,
+        )
+
+    def record_sync(self, event: AuditEvent) -> int:
+        """Write one row and return its id.
+
+        With the batched writer the row is queued instead and 0 is returned
+        (``event.id`` stays None); it is written within ``flush_interval_ms``.
+        """
+        row = self._row(event)
+        if self._queue is not None:
+            if self._writer_error is not None:
+                raise RuntimeError("audit writer failed") from self._writer_error
+            self._queue.put(row)
+            return 0
         with self._cursor() as cur:
-            cur.execute(
-                """INSERT INTO events (ts, agent_id, tool, decision, reason, latency_ms,
-                   transport, request_id, session_id, approver, arguments, result, findings,
-                   redactions, injection_score, is_error, method, protocol_version,
-                   client_name, client_version, traceparent, tracestate, meta,
-                   tenant_id, labels, approval_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    event.ts,
-                    event.agent_id,
-                    event.tool,
-                    event.decision.value,
-                    event.reason,
-                    event.latency_ms,
-                    event.transport,
-                    event.request_id,
-                    event.session_id,
-                    event.approver,
-                    args,
-                    result,
-                    findings,
-                    event.redactions,
-                    event.injection_score,
-                    int(event.is_error),
-                    event.method,
-                    event.protocol_version,
-                    event.client_name,
-                    event.client_version,
-                    event.traceparent,
-                    event.tracestate,
-                    meta,
-                    event.tenant_id,
-                    json.dumps(event.labels) if event.labels else None,
-                    event.approval_id,
-                ),
-            )
+            cur.execute(_INSERT, row)
             row_id = cur.lastrowid
         event.id = row_id
         return int(row_id or 0)
 
     async def record(self, event: AuditEvent) -> int:
+        if self._queue is not None and not self._queue.full():
+            return self.record_sync(event)  # a non-blocking put: no thread hop needed
         return await asyncio.to_thread(self.record_sync, event)
+
+    def flush(self) -> None:
+        """Wait until every queued row is written (a no-op for the sync writer)."""
+        if self._queue is not None and self._writer is not None and self._writer.is_alive():
+            self._queue.put(_FLUSH)  # wakes the writer instead of waiting out the interval
+            self._queue.join()
+        if self._writer_error is not None:
+            raise RuntimeError("audit writer failed") from self._writer_error
+
+    def _drain(self) -> None:
+        """Writer thread: one transaction per batch of up to ``batch_size`` rows."""
+        assert self._queue is not None
+        q = self._queue
+        interval = self.config.flush_interval_ms / 1000
+        stop = False
+        while not stop:
+            batch: list[tuple[Any, ...]] = []
+            taken = 0
+            deadline: float | None = None  # set once the first row arrives
+            while len(batch) < self.config.batch_size:
+                try:
+                    if deadline is None:
+                        item = q.get()
+                    else:
+                        item = q.get(timeout=max(deadline - time.monotonic(), 0.0))
+                except queue.Empty:
+                    break
+                taken += 1
+                if item is None:
+                    stop = True
+                    break
+                if item is _FLUSH:
+                    break
+                batch.append(item)
+                if deadline is None:
+                    deadline = time.monotonic() + interval
+            try:
+                if batch:
+                    with self._cursor() as cur:
+                        cur.executemany(_INSERT, batch)
+            except BaseException as exc:  # pragma: no cover - disk full, db closed
+                self._writer_error = exc
+                logger.exception("audit writer failed; %d row(s) lost", len(batch))
+            finally:
+                for _ in range(taken):
+                    q.task_done()
 
     # ------------------------------------------------------------------ reads
 
@@ -423,6 +507,10 @@ class AuditLog:
         return int(rows[0]["n"])
 
     def close(self) -> None:
+        """Flush queued rows (batched writer) and close the database."""
+        if self._queue is not None and self._writer is not None and self._writer.is_alive():
+            self._queue.put(None)
+            self._writer.join()
         with self._lock:
             self._conn.close()
 
@@ -481,6 +569,7 @@ class AuditLog:
         return ("WHERE " + " AND ".join(clauses)) if clauses else "", params
 
     def _fetch(self, sql: str, params: list[Any]) -> list[sqlite3.Row]:
+        self.flush()
         with self._cursor() as cur:
             cur.execute(sql, params)
             return list(cur.fetchall())

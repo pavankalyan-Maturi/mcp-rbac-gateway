@@ -398,6 +398,25 @@ def create_approval_router(
 
 
 def approver_from_config(config: HitlConfig, broker: ApprovalBroker | None = None) -> Approver:
+    """The approver for ``hitl.mode``.
+
+    Which mode when *your* app mounts :func:`create_approval_router`
+    (rather than ``mcp-rbac-gateway serve`` doing it):
+
+    * ``api`` - calls wait for ``POST /approvals/{id}/approve|deny`` on your
+      router. Use this when people decide in your own UI.
+    * ``webhook`` - the same, plus a POST to ``hitl.webhook.url`` per request
+      (Slack, PagerDuty ...). The webhook may also answer inline.
+    * ``auto_deny`` - nothing waits on the router: every approval is denied at
+      once, so a mounted router only ever lists an empty queue. Use it to
+      switch approvals off in an environment, not with a router.
+    * ``cli`` - prompts on the gateway's terminal; wrong for a server.
+    * ``auto_approve`` - tests only.
+
+    With ``check_call(..., wait=False)`` the mode does not matter: the request
+    goes to the store and your code decides through :meth:`Sentinel.resume_call`
+    or the router.
+    """
     if config.mode == "auto_approve":
         return AutoApprover(True)
     if config.mode == "auto_deny":
