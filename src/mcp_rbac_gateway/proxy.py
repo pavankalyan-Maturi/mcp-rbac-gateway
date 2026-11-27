@@ -174,7 +174,12 @@ class MessageInterceptor:
         if not isinstance(arguments, dict):
             arguments = {"_": arguments}
         started = time.perf_counter()
-        verdict = await self.sentinel.check_call(self.agent, tool, arguments)
+        context = CallContext(
+            session_id=self.session_id,
+            request_id=str(msg["id"]),
+            traceparent=meta.traceparent,
+        )
+        verdict = await self.sentinel.check_call(self.agent, tool, arguments, context=context)
         if not verdict.allowed:
             await self._record(verdict, started, msg["id"], meta)
             logger.info("blocked %s for %s: %s", tool, verdict.agent_id, verdict.reason)

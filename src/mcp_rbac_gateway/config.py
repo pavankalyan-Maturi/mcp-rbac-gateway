@@ -201,7 +201,19 @@ class WebhookConfig(_Strict):
 
 class HitlConfig(_Strict):
     enabled: bool = True
-    mode: Literal["cli", "webhook", "auto_approve", "auto_deny"] = "cli"
+    mode: Literal["cli", "webhook", "api", "auto_approve", "auto_deny"] = Field(
+        default="cli",
+        description="Who decides: cli (terminal prompt), webhook (POST + approval API), api "
+        "(approval API only), auto_approve, auto_deny.",
+    )
+    store: Literal["memory", "sqlite"] = Field(
+        default="memory",
+        description="Where pending approvals live. sqlite survives restarts and is shared by "
+        "every process using the file.",
+    )
+    store_path: str | None = Field(
+        default=None, description="SQLite file for store: sqlite (default: audit.path)."
+    )
     timeout_seconds: float = Field(default=300.0, gt=0)
     tools: list[str] = Field(
         default_factory=list, description="Tool globs that always need approval."

@@ -367,9 +367,14 @@ class AuditLog:
         tool_calls: dict[str, list[int]] = {}
         redactions = injections = 0
         blocked_values = {d.value for d in AuditDecision if d.is_block}
+        requested = AuditDecision.PENDING_APPROVAL.value
+        calls = 0
         for r in rows:
             decision = r["decision"]
             by_decision[decision] = by_decision.get(decision, 0) + 1
+            if decision == requested:
+                continue  # an approval request, not a separate call
+            calls += 1
             blocked = decision in blocked_values
             a = agents.setdefault(
                 r["agent_id"], AgentStats(agent_id=r["agent_id"], calls=0, blocked=0, approvals=0)
@@ -403,7 +408,7 @@ class AuditLog:
         tools.sort(key=lambda t: (-t.calls, t.tool))
         ts_values = [r["ts"] for r in rows]
         return AuditSummary(
-            total=len(rows),
+            total=calls,
             by_decision=by_decision,
             agents=sorted(agents.values(), key=lambda a: (-a.calls, a.agent_id)),
             tools=tools,

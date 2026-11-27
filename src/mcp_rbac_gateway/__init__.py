@@ -4,12 +4,20 @@ from __future__ import annotations
 
 __version__ = "0.2.0"
 
+from .approvals import (
+    ApprovalRecord,
+    ApprovalStatus,
+    ApprovalStore,
+    MemoryApprovalStore,
+    SqliteApprovalStore,
+)
 from .audit import AuditEvent, AuditLog, AuditPage, create_audit_router
 from .config import SentinelConfig, load_config
 from .context import CallContext, call_context, current_call_context
 from .gateway import ResultCheck, Sentinel, ToolBlockedError, agent_context, current_agent
 from .hitl import (
     ApprovalBroker,
+    ApprovalConflict,
     ApprovalGate,
     ApprovalRequest,
     ApprovalResponse,
@@ -29,9 +37,13 @@ from .sync import run_sync
 
 __all__ = [
     "ApprovalBroker",
+    "ApprovalConflict",
     "ApprovalGate",
+    "ApprovalRecord",
     "ApprovalRequest",
     "ApprovalResponse",
+    "ApprovalStatus",
+    "ApprovalStore",
     "Approver",
     "AuditDecision",
     "AuditEvent",
@@ -43,6 +55,7 @@ __all__ = [
     "CallVerdict",
     "CallbackApprover",
     "Finding",
+    "MemoryApprovalStore",
     "HttpProxy",
     "MessageInterceptor",
     "PolicyAction",
@@ -54,6 +67,7 @@ __all__ = [
     "Scanner",
     "Sentinel",
     "SentinelConfig",
+    "SqliteApprovalStore",
     "StatelessHttpProxy",
     "StdioProxy",
     "TaskRegistry",

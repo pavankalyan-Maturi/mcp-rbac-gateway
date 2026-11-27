@@ -277,6 +277,7 @@ _DECISION_STYLE = {
     AuditDecision.DENIED_BY_HUMAN.value: "yellow",
     AuditDecision.APPROVAL_TIMEOUT.value: "yellow",
     AuditDecision.ERROR.value: "bright_red",
+    AuditDecision.PENDING_APPROVAL.value: "blue",
 }
 
 

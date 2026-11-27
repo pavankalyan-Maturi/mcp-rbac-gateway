@@ -23,10 +23,18 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
+from .approvals import ApprovalRequest, ApprovalResponse, ApprovalStatus
 from .audit import AuditEvent, AuditLog
 from .config import SentinelConfig, load_config
-from .context import CallContext, call_context, current_call_context
-from .hitl import ApprovalBroker, ApprovalGate, Approver, approver_from_config
+from .context import CallContext, current_call_context
+from .hitl import (
+    ApprovalBroker,
+    ApprovalConflict,
+    ApprovalGate,
+    Approver,
+    approver_from_config,
+    store_from_config,
+)
 from .mcp import RequestMeta, TaskRegistry, param_header_map
 from .models import AuditDecision, CallVerdict, Finding, PolicyAction, ScanResult
 from .policy import PolicyEngine
@@ -107,7 +115,9 @@ class Sentinel:
         self.config = config or SentinelConfig()
         self.policy = PolicyEngine(self.config)
         self.scanner = Scanner(self.config.scanner)
-        self.broker = broker or ApprovalBroker()
+        self.broker = broker or ApprovalBroker(
+            store_from_config(self.config.hitl, self.config.audit.path)
+        )
         self.gate = ApprovalGate(
             self.config.hitl, approver or approver_from_config(self.config.hitl, self.broker)
         )
@@ -165,8 +175,22 @@ class Sentinel:
         agent_id: str | None,
         tool: str,
         arguments: Mapping[str, Any] | None = None,
+        *,
+        context: CallContext | None = None,
+        wait: bool = True,
     ) -> CallVerdict:
-        """Run policy, input scanning and approval for one call."""
+        """Run policy, input scanning and approval for one call.
+
+        When the call needs approval, the request is written to the audit trail
+        (decision ``pending_approval``) and then:
+
+        * ``wait=True`` (default): wait for the approver; the verdict is
+          ``approved``, ``denied_by_human`` or ``approval_timeout``.
+        * ``wait=False``: store the request in the approval store and return at
+          once with decision ``pending_approval`` and ``approval_id`` set. Pause
+          your own way (LangGraph ``interrupt``, a Temporal signal ...) and
+          finish with :meth:`resume_call`.
+        """
         agent = self.agent_or_default(agent_id)
         raw_args = dict(arguments or {})
 
@@ -204,7 +228,33 @@ class Sentinel:
             tool, raw_args, decision, self.tool_annotations.get(tool)
         )
         if reason is not None:
-            outcome = await self.gate.review(agent, tool, safe_args, reason)
+            ctx = context or current_call_context() or CallContext()
+            request = ApprovalRequest(
+                agent_id=agent,
+                tool=tool,
+                arguments=safe_args,
+                reason=reason,
+                timeout_seconds=self.config.hitl.timeout_seconds,
+                tenant_id=ctx.tenant_id,
+                session_id=ctx.session_id,
+                request_id=ctx.request_id,
+                traceparent=ctx.traceparent,
+            )
+            requested = CallVerdict(
+                agent_id=agent,
+                tool=tool,
+                decision=AuditDecision.PENDING_APPROVAL,
+                reason=f"approval requested: {reason}",
+                arguments=safe_args,
+                findings=findings,
+                approval_id=request.id,
+            )
+            if not wait:
+                self.broker.register(request)
+                await self.record(requested, context=ctx)
+                return requested
+            await self.record(requested, context=ctx)
+            outcome = await self.gate.review(agent, tool, safe_args, reason, request=request)
             return CallVerdict(
                 agent_id=agent,
                 tool=tool,
@@ -213,6 +263,7 @@ class Sentinel:
                 arguments=safe_args,
                 findings=findings,
                 approver=outcome.approver,
+                approval_id=request.id,
             )
 
         return CallVerdict(
@@ -393,6 +444,7 @@ class Sentinel:
             meta=safe_meta,
             tenant_id=ctx.tenant_id,
             labels=dict(ctx.labels),
+            approval_id=verdict.approval_id,
         )
 
     # ------------------------------------------------------------- pipeline
@@ -406,6 +458,7 @@ class Sentinel:
         agent_id: str | None = None,
         transport: str = "python",
         context: CallContext | None = None,
+        wait: bool = True,
     ) -> T:
         """Guard an arbitrary async callable end to end.
 
@@ -416,7 +469,9 @@ class Sentinel:
         """
         ctx = self.resolve_context(context)
         started = time.perf_counter()
-        verdict = await self.check_call(agent_id, tool, arguments)
+        verdict = await self.check_call(agent_id, tool, arguments, context=ctx, wait=wait)
+        if verdict.pending:
+            raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
         if not verdict.allowed:
             await self.record(
                 verdict,
@@ -425,6 +480,16 @@ class Sentinel:
                 context=ctx,
             )
             raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
+        return await self._run_checked(fn, verdict, started, transport, ctx)
+
+    async def _run_checked(
+        self,
+        fn: Callable[[dict[str, Any]], Awaitable[T]],
+        verdict: CallVerdict,
+        started: float,
+        transport: str,
+        ctx: CallContext,
+    ) -> T:
         try:
             result = await fn(verdict.arguments)
         except Exception as exc:
@@ -470,9 +535,14 @@ class Sentinel:
         agent_id: str | None,
         tool: str,
         arguments: Mapping[str, Any] | None = None,
+        *,
+        context: CallContext | None = None,
+        wait: bool = True,
     ) -> CallVerdict:
         """Blocking form of :meth:`check_call`. See :func:`run_sync` for loop handling."""
-        return run_sync(lambda: self.check_call(agent_id, tool, arguments))
+        return run_sync(
+            lambda: self.check_call(agent_id, tool, arguments, context=context, wait=wait)
+        )
 
     def call_sync(
         self,
@@ -483,6 +553,7 @@ class Sentinel:
         agent_id: str | None = None,
         transport: str = "python",
         context: CallContext | None = None,
+        wait: bool = True,
     ) -> T:
         """Blocking form of :meth:`call` for a plain (sync) function.
 
@@ -492,7 +563,11 @@ class Sentinel:
         """
         ctx = self.resolve_context(context)
         started = time.perf_counter()
-        verdict = run_sync(lambda: self._check_in_context(agent_id, tool, arguments, ctx))
+        verdict = run_sync(
+            lambda: self.check_call(agent_id, tool, arguments, context=ctx, wait=wait)
+        )
+        if verdict.pending:
+            raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
         if not verdict.allowed:
             self.record_sync(
                 verdict,
@@ -501,6 +576,16 @@ class Sentinel:
                 context=ctx,
             )
             raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
+        return self._run_checked_sync(fn, verdict, started, transport, ctx)
+
+    def _run_checked_sync(
+        self,
+        fn: Callable[[dict[str, Any]], T],
+        verdict: CallVerdict,
+        started: float,
+        transport: str,
+        ctx: CallContext,
+    ) -> T:
         try:
             result = fn(verdict.arguments)
         except Exception as exc:
@@ -539,15 +624,113 @@ class Sentinel:
         )
         return check.payload  # type: ignore[no-any-return]
 
-    async def _check_in_context(
+    # ------------------------------------------------------- resumed approvals
+
+    def _resolve_pending(
+        self, approval_id: str, response: ApprovalResponse
+    ) -> tuple[CallVerdict, CallContext]:
+        record = self.broker.record(approval_id)
+        if record is None:
+            raise LookupError(f"no approval request {approval_id}")
+        request = record.request
+        ctx = CallContext(
+            tenant_id=request.tenant_id,
+            session_id=request.session_id,
+            request_id=request.request_id,
+            traceparent=request.traceparent,
+        )
+
+        def verdict(decision: AuditDecision, reason: str, approver: str | None) -> CallVerdict:
+            return CallVerdict(
+                agent_id=request.agent_id,
+                tool=request.tool,
+                method=request.method,
+                decision=decision,
+                reason=reason,
+                arguments=request.arguments,
+                approver=approver,
+                approval_id=request.id,
+            )
+
+        if not self.broker.resolve(approval_id, response):
+            current = self.broker.record(approval_id)
+            status = current.status if current else ApprovalStatus.EXPIRED
+            if status is ApprovalStatus.EXPIRED:
+                timeout = verdict(
+                    AuditDecision.APPROVAL_TIMEOUT,
+                    f"no approval within {request.timeout_seconds:g}s ({request.reason})",
+                    None,
+                )
+                return timeout, ctx
+            raise ApprovalConflict(approval_id, status)
+        comment = f" ({response.comment})" if response.comment else ""
+        if response.approved:
+            return (
+                verdict(
+                    AuditDecision.APPROVED,
+                    f"approved: {request.reason}{comment}",
+                    response.approver,
+                ),
+                ctx,
+            )
+        return (
+            verdict(
+                AuditDecision.DENIED_BY_HUMAN,
+                f"denied by {response.approver or 'approver'}{comment}",
+                response.approver,
+            ),
+            ctx,
+        )
+
+    async def resume_call(
         self,
-        agent_id: str | None,
-        tool: str,
-        arguments: Mapping[str, Any] | None,
-        ctx: CallContext,
-    ) -> CallVerdict:
-        with call_context(ctx):
-            return await self.check_call(agent_id, tool, arguments)
+        approval_id: str,
+        response: ApprovalResponse | bool,
+        fn: Callable[[dict[str, Any]], Awaitable[T]] | None = None,
+        *,
+        transport: str = "python",
+    ) -> Any:
+        """Finish a call that ``check_call(..., wait=False)`` left pending.
+
+        Decides the stored request (first decision wins: a second one raises
+        :class:`ApprovalConflict`) and writes the decision to the audit trail
+        with the tenant, session and request ids of the original call.
+
+        Without ``fn`` this returns the :class:`CallVerdict`. With ``fn``, an
+        approved call runs ``fn(arguments)`` and returns its scanned result,
+        exactly like :meth:`call`; a denied or expired one raises
+        :class:`ToolBlockedError`.
+        """
+        if isinstance(response, bool):
+            response = ApprovalResponse(approved=response)
+        started = time.perf_counter()
+        verdict, ctx = self._resolve_pending(approval_id, response)
+        if fn is None or not verdict.allowed:
+            await self.record(verdict, transport=transport, context=ctx)
+            if fn is None:
+                return verdict
+            raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
+        return await self._run_checked(fn, verdict, started, transport, ctx)
+
+    def resume_call_sync(
+        self,
+        approval_id: str,
+        response: ApprovalResponse | bool,
+        fn: Callable[[dict[str, Any]], T] | None = None,
+        *,
+        transport: str = "python",
+    ) -> Any:
+        """Blocking form of :meth:`resume_call`; ``fn`` runs in the calling thread."""
+        if isinstance(response, bool):
+            response = ApprovalResponse(approved=response)
+        started = time.perf_counter()
+        verdict, ctx = self._resolve_pending(approval_id, response)
+        if fn is None or not verdict.allowed:
+            self.record_sync(verdict, transport=transport, context=ctx)
+            if fn is None:
+                return verdict
+            raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
+        return self._run_checked_sync(fn, verdict, started, transport, ctx)
 
     def guard(
         self,

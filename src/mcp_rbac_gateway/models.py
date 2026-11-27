@@ -33,6 +33,9 @@ class AuditDecision(str, Enum):
     DENIED_BY_HUMAN = "denied_by_human"
     APPROVAL_TIMEOUT = "approval_timeout"
     ERROR = "error"
+    PENDING_APPROVAL = "pending_approval"
+    """Approval was requested. Audit rows with this decision record the request;
+    a verdict with it comes from ``check_call(..., wait=False)``."""
 
     @property
     def is_block(self) -> bool:
@@ -89,7 +92,15 @@ class CallVerdict(BaseModel):
     method: str = "tools/call"
     findings: list[Finding] = Field(default_factory=list)
     approver: str | None = None
+    approval_id: str | None = Field(
+        default=None, description="Id of the approval request, when one was made."
+    )
 
     @property
     def allowed(self) -> bool:
-        return not self.decision.is_block and self.decision is not AuditDecision.ERROR
+        """True only when the call may run now (allowed, or approved by a human)."""
+        return self.decision in (AuditDecision.ALLOWED, AuditDecision.APPROVED)
+
+    @property
+    def pending(self) -> bool:
+        return self.decision is AuditDecision.PENDING_APPROVAL
