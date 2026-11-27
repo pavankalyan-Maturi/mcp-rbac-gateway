@@ -211,6 +211,59 @@ def serve(
         sentinel.close()
 
 
+@app.command("proxy-http")
+def proxy_http(
+    config: ConfigOpt = Path("sentinel.yaml"),
+    upstream_url: Annotated[
+        str | None, typer.Option(help="Upstream MCP endpoint (defaults to upstream.url).")
+    ] = None,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    path: Annotated[str, typer.Option(help="Path for the MCP endpoint.")] = "/mcp",
+    agent: Annotated[
+        str | None, typer.Option("--agent", "-a", help="Agent used when no header is sent.")
+    ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Run a stateless Streamable HTTP proxy (MCP 2026-07-28: no initialize, no sessions)."""
+    _setup_logging(verbose)
+    cfg = _load(config)
+    url = upstream_url or cfg.upstream.url
+    if not url:
+        err.print("[red]no upstream URL:[/] set upstream.url or pass --upstream-url")
+        raise typer.Exit(2)
+    import uvicorn
+
+    from .gateway import Sentinel
+    from .mcp import SUPPORTED_STATELESS_VERSIONS
+    from .proxy import StatelessHttpProxy
+
+    sentinel = Sentinel(cfg)
+    token_env = cfg.hitl.webhook.token_env
+    proxy = StatelessHttpProxy(
+        sentinel,
+        url,
+        path=path,
+        default_agent=agent,
+        headers=cfg.upstream.headers,
+        approval_token=os.environ.get(token_env) if token_env else None,
+    )
+    err.print(
+        Panel.fit(
+            f"[bold]mcp-rbac-gateway[/] {__version__} (stateless)\n"
+            f"proxy    http://{host}:{port}{path}  "
+            f"(MCP {', '.join(SUPPORTED_STATELESS_VERSIONS)})\n"
+            f"upstream {url}\n"
+            f"approvals http://{host}:{port}/approvals",
+            border_style="cyan",
+        )
+    )
+    try:
+        uvicorn.run(proxy.build_app(), host=host, port=port, log_level="warning")
+    finally:
+        sentinel.close()
+
+
 # ------------------------------------------------------------------- report
 
 _SINCE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhdw])$")
@@ -400,8 +453,17 @@ def validate(config: ConfigOpt = Path("sentinel.yaml")) -> None:
     Scanner(cfg.scanner)  # validates detector names
     engine = PolicyEngine(cfg)
     table = Table(title=f"{config} is valid ✓", box=box.ROUNDED, title_style="bold green")
-    for col in ("agent", "allow", "deny", "approval", "arg rules"):
+    for col in ("agent", "allow", "deny", "approval", "arg rules", "methods", "skills"):
         table.add_column(col, overflow="fold")
+
+    def rules(allow: list[str], deny: list[str]) -> Text:
+        parts = []
+        if allow:
+            parts.append("+" + ", +".join(dict.fromkeys(allow)))
+        if deny:
+            parts.append("-" + ", -".join(dict.fromkeys(deny)))
+        return Text(", ".join(parts) or "-")
+
     for name in cfg.agents:
         eff = engine.effective_policy(name)
         table.add_row(
@@ -410,6 +472,8 @@ def validate(config: ConfigOpt = Path("sentinel.yaml")) -> None:
             Text(", ".join(dict.fromkeys(eff.deny)) or "-"),
             Text(", ".join(dict.fromkeys(eff.require_approval)) or "-"),
             str(sum(len(c) for _, c in eff.arguments)),
+            rules(eff.method_allow, eff.method_deny),
+            rules(eff.skill_allow, eff.skill_deny),
         )
     out.print(table)
     out.print(
@@ -497,6 +561,10 @@ agents:
       fetch_url:
         url:
           pattern: 'https://.*'
+    skills:                          # MCP skills extension: globs on skill://<path>/SKILL.md
+      allow: ["research/*"]
+    methods:                         # any JSON-RPC method except tools/call
+      deny: ["tasks/cancel"]
 
   operator:
     description: Can change things, with a human in the loop.
@@ -531,6 +599,9 @@ hitl:
 audit:
   path: .sentinel/audit.db
   log_arguments: true
+
+tasks:
+  bind_to_agent: true                # only the creating agent may poll/cancel a task
 
 upstream:
   command: ["python", "-m", "my_mcp_server"]

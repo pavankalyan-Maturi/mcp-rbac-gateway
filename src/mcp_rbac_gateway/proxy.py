@@ -32,7 +32,21 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import urljoin
 
-from .gateway import Sentinel, ToolBlockedError
+from .gateway import ResultCheck, Sentinel, ToolBlockedError
+from .mcp import (
+    HEADER_MISMATCH,
+    NAME_SOURCES,
+    POLICY_DENIED,
+    SUPPORTED_STATELESS_VERSIONS,
+    TASK_METHODS,
+    UNSUPPORTED_PROTOCOL_VERSION,
+    RequestMeta,
+    TaskRegistry,
+    decode_header_value,
+    expected_name,
+    header_param_value,
+    skill_path,
+)
 from .models import AuditDecision, CallVerdict
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -43,6 +57,7 @@ __all__ = [
     "HttpProxy",
     "MessageInterceptor",
     "OnBlock",
+    "StatelessHttpProxy",
     "StdioProxy",
     "guard",
 ]
@@ -60,14 +75,21 @@ def _key(msg_id: Any) -> str:
     return json.dumps(msg_id, sort_keys=True)
 
 
-def tool_error_result(text: str) -> JSON:
-    return {"content": [{"type": "text", "text": text}], "isError": True}
+def tool_error_result(text: str, *, modern: bool = False) -> JSON:
+    """An MCP ``CallToolResult`` with ``isError``; ``modern`` adds 2026-07-28 ``resultType``."""
+    result: JSON = {"content": [{"type": "text", "text": text}], "isError": True}
+    if modern:
+        result["resultType"] = "complete"
+    return result
 
 
 @dataclass
 class _PendingCall:
     verdict: CallVerdict
     started: float
+    meta: RequestMeta = field(default_factory=RequestMeta)
+    kind: Literal["tool", "task", "skill_content"] = "tool"
+    task_id: str | None = None
 
 
 @dataclass
@@ -78,17 +100,30 @@ class Intercepted:
     respond: JSON | None = None  # message to send straight back to the client
 
 
+_TERMINAL_TASK_STATES = frozenset({"completed", "failed", "cancelled"})
+
+
 @dataclass
 class MessageInterceptor:
-    """Transport-agnostic JSON-RPC inspection for one MCP session."""
+    """Transport-agnostic JSON-RPC inspection for one MCP session (or one stateless request).
+
+    ``tasks`` is shared across interceptors so that a task created in one
+    stateless HTTP request can be polled in the next.
+    """
 
     sentinel: Sentinel
     agent_id: str | None = None
     transport: str = "stdio"
     session_id: str | None = None
+    tasks: TaskRegistry | None = None
     _calls: dict[str, _PendingCall] = field(default_factory=dict)
     _lists: set[str] = field(default_factory=set)
+    _skill_lists: set[str] = field(default_factory=set)
     _redact_only: set[str] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        if self.tasks is None:
+            self.tasks = self.sentinel.tasks
 
     @property
     def agent(self) -> str:
@@ -99,18 +134,41 @@ class MessageInterceptor:
     async def on_client_message(self, msg: Any) -> Intercepted:
         if not isinstance(msg, dict) or "method" not in msg or "id" not in msg:
             return Intercepted(forward=msg)  # notifications, responses, junk
-        method = msg.get("method")
+        method = str(msg.get("method"))
+        raw_params = msg.get("params")
+        params: JSON = raw_params if isinstance(raw_params, dict) else {}
+        meta = RequestMeta.from_params(params)
+        if method == "tools/call":
+            return await self._on_tool_call(msg, params, meta)
+        if method in TASK_METHODS:
+            return await self._on_task_request(msg, method, params, meta)
+        if method in ("skills/get", "resources/read", "resources/directory/read"):
+            uri = str(params.get("uri", ""))
+            path = skill_path(uri)
+            if path is not None:
+                return await self._on_skill_read(msg, method, path, meta)
+
+        decision = self.sentinel.policy.evaluate_method(self.agent, method)
+        if not decision.allowed:
+            verdict = CallVerdict(
+                agent_id=self.agent,
+                tool=method,
+                method=method,
+                decision=AuditDecision.BLOCKED_POLICY,
+                reason=f"{decision.reason} ({decision.rule})",
+                arguments={},
+            )
+            return await self._refuse(msg, verdict, meta, time.perf_counter())
         key = _key(msg["id"])
         if method == "tools/list":
             self._lists.add(key)
-            return Intercepted(forward=msg)
-        if method in ("resources/read", "prompts/get"):
+        elif method == "skills/list":
+            self._skill_lists.add(key)
+        elif method in ("resources/read", "prompts/get"):
             self._redact_only.add(key)
-            return Intercepted(forward=msg)
-        if method != "tools/call":
-            return Intercepted(forward=msg)
+        return Intercepted(forward=msg)
 
-        params = msg.get("params") or {}
+    async def _on_tool_call(self, msg: JSON, params: JSON, meta: RequestMeta) -> Intercepted:
         tool = str(params.get("name", ""))
         arguments = params.get("arguments") or {}
         if not isinstance(arguments, dict):
@@ -118,32 +176,118 @@ class MessageInterceptor:
         started = time.perf_counter()
         verdict = await self.sentinel.check_call(self.agent, tool, arguments)
         if not verdict.allowed:
-            await self.sentinel.record(
-                verdict,
-                latency_ms=(time.perf_counter() - started) * 1000,
-                transport=self.transport,
-                request_id=msg["id"],
-                session_id=self.session_id,
-            )
+            await self._record(verdict, started, msg["id"], meta)
             logger.info("blocked %s for %s: %s", tool, verdict.agent_id, verdict.reason)
             text = f"{BLOCK_PREFIX} Tool call blocked ({verdict.decision.value}): {verdict.reason}"
             return Intercepted(
-                respond={"jsonrpc": "2.0", "id": msg["id"], "result": tool_error_result(text)}
+                respond={
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "result": tool_error_result(text, modern=meta.is_stateless),
+                }
             )
-        self._calls[key] = _PendingCall(verdict, started)
+        self._calls[_key(msg["id"])] = _PendingCall(verdict, started, meta)
+        # Only `arguments` is rewritten; `_meta` (clientInfo, traceparent ...) and
+        # every other field reach the server exactly as the client sent them.
         forwarded = dict(msg)
         forwarded["params"] = {**params, "arguments": verdict.arguments}
         return Intercepted(forward=forwarded)
 
+    async def _on_task_request(
+        self, msg: JSON, method: str, params: JSON, meta: RequestMeta
+    ) -> Intercepted:
+        started = time.perf_counter()
+        task_id = str(params.get("taskId", ""))
+        assert self.tasks is not None
+        record = self.tasks.get(task_id)
+        target = record.tool if record else f"task:{task_id}"
+        scan = params.get("inputResponses") if method == "tasks/update" else None
+        verdict = self.sentinel.check_method(self.agent, method, target, scan=scan)
+        if verdict.allowed and self.sentinel.config.tasks.bind_to_agent:
+            if record is None or record.agent_id != verdict.agent_id:
+                # Same answer for "unknown" and "someone else's": don't leak which ids exist.
+                verdict = verdict.model_copy(
+                    update={
+                        "decision": AuditDecision.BLOCKED_POLICY,
+                        "reason": f"task '{task_id}' was not created by agent "
+                        f"'{verdict.agent_id}' through this gateway (tasks.bind_to_agent)",
+                    }
+                )
+                await self._record(verdict, started, msg["id"], meta)
+                return Intercepted(
+                    respond=_error(msg["id"], -32602, f"Unknown or expired taskId '{task_id}'")
+                )
+        if not verdict.allowed:
+            return await self._refuse(msg, verdict, meta, started)
+        forwarded = msg
+        if scan is not None:
+            forwarded = {
+                **msg,
+                "params": {**params, "inputResponses": verdict.arguments.get("input", scan)},
+            }
+        self._calls[_key(msg["id"])] = _PendingCall(
+            verdict, started, meta, kind="task", task_id=task_id
+        )
+        return Intercepted(forward=forwarded)
+
+    async def _on_skill_read(
+        self, msg: JSON, method: str, path: str, meta: RequestMeta
+    ) -> Intercepted:
+        started = time.perf_counter()
+        verdict = self.sentinel.check_method(
+            self.agent, method, f"skill:{path}" if path else "skill:", skill=path
+        )
+        if not verdict.allowed:
+            return await self._refuse(msg, verdict, meta, started)
+        if method == "resources/directory/read":
+            self._redact_only.add(_key(msg["id"]))
+        else:
+            self._calls[_key(msg["id"])] = _PendingCall(
+                verdict, started, meta, kind="skill_content"
+            )
+        return Intercepted(forward=msg)
+
+    async def _refuse(
+        self, msg: JSON, verdict: CallVerdict, meta: RequestMeta, started: float
+    ) -> Intercepted:
+        await self._record(verdict, started, msg["id"], meta)
+        logger.info("blocked %s for %s: %s", verdict.method, verdict.agent_id, verdict.reason)
+        text = (
+            f"{BLOCK_PREFIX} {verdict.method} blocked ({verdict.decision.value}): {verdict.reason}"
+        )
+        return Intercepted(respond=_error(msg["id"], POLICY_DENIED, text))
+
+    async def _record(
+        self, verdict: CallVerdict, started: float, request_id: Any, meta: RequestMeta, **kw: Any
+    ) -> None:
+        await self.sentinel.record(
+            verdict,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            transport=self.transport,
+            request_id=request_id,
+            session_id=self.session_id,
+            meta=meta,
+            **kw,
+        )
+
     # ---------------------------------------------------------- server side
 
     async def on_server_message(self, msg: Any) -> Any:
-        if not isinstance(msg, dict) or "method" in msg or "id" not in msg:
-            return msg  # notifications and server->client requests
+        if not isinstance(msg, dict):
+            return msg
+        if "method" in msg:
+            if msg.get("method") == "notifications/tasks" and isinstance(msg.get("params"), dict):
+                return {**msg, "params": self._filter_task(msg["params"])[0]}
+            return msg  # other notifications and server->client requests
+        if "id" not in msg:
+            return msg
         key = _key(msg["id"])
         if key in self._lists:
             self._lists.discard(key)
             return self._filter_tool_list(msg)
+        if key in self._skill_lists:
+            self._skill_lists.discard(key)
+            return self._filter_skill_list(msg)
         if key in self._redact_only:
             self._redact_only.discard(key)
             if isinstance(msg.get("result"), dict):
@@ -153,6 +297,10 @@ class MessageInterceptor:
         pending = self._calls.pop(key, None)
         if pending is None:
             return msg
+        if pending.kind == "task":
+            return await self._finish_task_request(msg, pending)
+        if pending.kind == "skill_content":
+            return await self._finish_skill_read(msg, pending)
         return await self._finish_call(msg, pending)
 
     def _filter_tool_list(self, msg: JSON) -> JSON:
@@ -167,49 +315,179 @@ class MessageInterceptor:
             logger.info("hid %d tool(s) from agent %s", hidden, self.agent)
         return {**msg, "result": {**result, "tools": visible}}
 
+    def _filter_skill_list(self, msg: JSON) -> JSON:
+        result = msg.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("skills"), list):
+            return msg
+        skills = result["skills"]
+        visible = self.sentinel.visible_skills(self.agent, skills)
+        if len(visible) != len(skills):
+            logger.info("hid %d skill(s) from agent %s", len(skills) - len(visible), self.agent)
+        redacted = self.sentinel.scanner.redact({**result, "skills": visible}, direction="output")
+        return {**msg, "result": redacted.payload}
+
+    def _filter_task(self, task: JSON) -> tuple[JSON, ResultCheck]:
+        """Redact and injection-check a Task object (``tasks/get`` result or notification)."""
+        check = self.sentinel.check_result(task)
+        payload = check.payload if isinstance(check.payload, dict) else task
+        if check.blocked:
+            text = f"{BLOCK_PREFIX} Task output withheld: {check.reason}"
+            payload = {**payload, "statusMessage": text}
+            if "result" in payload:
+                payload["result"] = tool_error_result(text, modern=True)
+            if "inputRequests" in payload:
+                # An injected elicitation must not reach the user either.
+                payload = {k: v for k, v in payload.items() if k != "inputRequests"}
+                payload["status"] = "failed"
+                payload["error"] = {"code": POLICY_DENIED, "message": text}
+        return payload, check
+
     async def _finish_call(self, msg: JSON, pending: _PendingCall) -> JSON:
         verdict = pending.verdict
         if "error" in msg:
             err = msg.get("error") or {}
-            await self.sentinel.record(
+            await self._record(
                 verdict,
+                pending.started,
+                msg["id"],
+                pending.meta,
                 decision=AuditDecision.ERROR,
                 reason=f"upstream error {err.get('code')}: {err.get('message')}",
-                latency_ms=(time.perf_counter() - pending.started) * 1000,
-                transport=self.transport,
-                request_id=msg["id"],
-                session_id=self.session_id,
                 is_error=True,
             )
             return msg
         result = msg.get("result")
+        if isinstance(result, dict) and result.get("resultType") == "task":
+            return await self._task_created(msg, result, pending)
+        if isinstance(result, dict) and isinstance(result.get("task"), dict):
+            # 2025-11-25 CreateTaskResult: the handle is nested under "task".
+            nested = result["task"]
+            if isinstance(nested.get("taskId"), str):
+                assert self.tasks is not None
+                self.tasks.add(nested["taskId"], verdict.agent_id, verdict.tool, nested.get("ttl"))
         check = self.sentinel.check_result(result)
-        latency = (time.perf_counter() - pending.started) * 1000
         if check.blocked:
-            await self.sentinel.record(
+            await self._record(
                 verdict,
+                pending.started,
+                msg["id"],
+                pending.meta,
                 decision=AuditDecision.BLOCKED_INJECTION,
                 reason=check.reason,
-                latency_ms=latency,
-                transport=self.transport,
-                request_id=msg["id"],
-                session_id=self.session_id,
                 result_check=check,
             )
             text = f"{BLOCK_PREFIX} Tool output withheld: {check.reason}"
-            return {**msg, "result": tool_error_result(text)}
+            modern = pending.meta.is_stateless or (
+                isinstance(result, dict) and "resultType" in result
+            )
+            return {**msg, "result": tool_error_result(text, modern=modern)}
         is_error = isinstance(result, dict) and bool(result.get("isError"))
-        await self.sentinel.record(
+        await self._record(
             verdict,
-            latency_ms=latency,
-            transport=self.transport,
-            request_id=msg["id"],
-            session_id=self.session_id,
+            pending.started,
+            msg["id"],
+            pending.meta,
             result=check.payload,
             result_check=check,
             is_error=is_error,
         )
         return {**msg, "result": check.payload}
+
+    async def _task_created(self, msg: JSON, handle: JSON, pending: _PendingCall) -> JSON:
+        """``tools/call`` answered with ``resultType: "task"`` (tasks extension)."""
+        verdict = pending.verdict
+        task_id = handle.get("taskId")
+        payload, check = self._filter_task(handle)
+        if isinstance(task_id, str):
+            assert self.tasks is not None
+            self.tasks.add(task_id, verdict.agent_id, verdict.tool, handle.get("ttlMs"))
+        await self._record(
+            verdict,
+            pending.started,
+            msg["id"],
+            pending.meta,
+            reason=f"{verdict.reason}; task {task_id} created ({handle.get('status')})",
+            result=payload,
+            result_check=check,
+        )
+        return {**msg, "result": payload}
+
+    async def _finish_task_request(self, msg: JSON, pending: _PendingCall) -> JSON:
+        verdict = pending.verdict
+        method = verdict.method
+        result = msg.get("result")
+        if "error" in msg or not isinstance(result, dict):
+            err = msg.get("error") or {}
+            await self._record(
+                verdict,
+                pending.started,
+                msg["id"],
+                pending.meta,
+                decision=AuditDecision.ERROR,
+                reason=f"upstream error {err.get('code')}: {err.get('message')}",
+                is_error=True,
+            )
+            return msg
+        if method == "tasks/result":
+            # The original tool's result, delivered late: same checks as a tool result.
+            return await self._finish_call(msg, pending)
+        if method != "tasks/get":
+            await self._record(verdict, pending.started, msg["id"], pending.meta)
+            return msg
+        payload, check = self._filter_task(result)
+        status = payload.get("status")
+        if check.blocked:
+            await self._record(
+                verdict,
+                pending.started,
+                msg["id"],
+                pending.meta,
+                decision=AuditDecision.BLOCKED_INJECTION,
+                reason=check.reason,
+                result_check=check,
+            )
+        elif status in _TERMINAL_TASK_STATES or check.findings:
+            # Polls of a running task are not audited one by one; the final
+            # state (and anything the scanner changed) is.
+            inner = payload.get("result")
+            is_error = status == "failed" or (
+                isinstance(inner, dict) and bool(inner.get("isError"))
+            )
+            await self._record(
+                verdict,
+                pending.started,
+                msg["id"],
+                pending.meta,
+                reason=f"task {pending.task_id} {status}",
+                result=payload,
+                result_check=check,
+                is_error=is_error,
+            )
+        return {**msg, "result": payload}
+
+    async def _finish_skill_read(self, msg: JSON, pending: _PendingCall) -> JSON:
+        verdict = pending.verdict
+        if "error" in msg:
+            return msg
+        check = self.sentinel.check_result(msg.get("result"))
+        if check.blocked:
+            await self._record(
+                verdict,
+                pending.started,
+                msg["id"],
+                pending.meta,
+                decision=AuditDecision.BLOCKED_INJECTION,
+                reason=check.reason,
+                result_check=check,
+            )
+            text = f"{BLOCK_PREFIX} Skill content withheld: {check.reason}"
+            return _error(msg["id"], POLICY_DENIED, text)
+        await self._record(verdict, pending.started, msg["id"], pending.meta, result_check=check)
+        return {**msg, "result": check.payload}
+
+
+def _error(msg_id: Any, code: int, message: str) -> JSON:
+    return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
 # =========================================================================
@@ -735,6 +1013,245 @@ class HttpProxy:
             return Response("Accepted", status_code=202)
 
         return app
+
+
+class StatelessHttpProxy(HttpProxy):
+    """Reverse proxy for the stateless Streamable HTTP transport (MCP 2026-07-28).
+
+    Every ``POST {path}`` is one self-contained JSON-RPC message. There is no
+    ``initialize`` handshake and no ``Mcp-Session-Id``: the protocol version,
+    client info and trace context travel in each request's ``params._meta``.
+
+    Before anything is forwarded the proxy checks the routing headers the
+    spec requires (``MCP-Protocol-Version``, ``Mcp-Method`` and, where the
+    method needs it, ``Mcp-Name``) against the body and answers ``400`` with
+    JSON-RPC error ``-32020`` (HeaderMismatch) when they disagree. Policy is
+    then decided on the body, so a load balancer that routes on headers and
+    the gateway that enforces policy on the body can never be told different
+    stories.
+
+    ``GET`` and ``DELETE`` on the endpoint return ``405``, as the spec asks of
+    servers that support only this revision. Use :class:`HttpProxy` (``serve``)
+    for clients and servers on 2025-era protocol versions.
+    """
+
+    def __init__(
+        self,
+        sentinel: Sentinel,
+        upstream_url: str,
+        *,
+        supported_versions: tuple[str, ...] = SUPPORTED_STATELESS_VERSIONS,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(sentinel, upstream_url, **kwargs)
+        self.supported_versions = supported_versions
+
+    def check_headers(self, headers: Mapping[str, str], msg: JSON) -> JSON | None:
+        """Validate routing headers against the body. Returns an error body or None."""
+        msg_id = msg.get("id")
+        method = str(msg.get("method"))
+        raw_params = msg.get("params")
+        params: JSON = raw_params if isinstance(raw_params, dict) else {}
+
+        version = headers.get("mcp-protocol-version")
+        if version not in self.supported_versions:
+            what = f"'{version}'" if version else "missing"
+            return _error_data(
+                msg_id,
+                UNSUPPORTED_PROTOCOL_VERSION,
+                f"Unsupported protocol version: MCP-Protocol-Version header is {what}",
+                {"supported": list(self.supported_versions), "requested": version},
+            )
+        meta = RequestMeta.from_params(params)
+        if "id" in msg:
+            if meta.protocol_version is None:
+                return _error(
+                    msg_id,
+                    -32602,
+                    "Invalid params: _meta['io.modelcontextprotocol/protocolVersion'] is required",
+                )
+            if meta.protocol_version != version:
+                return _mismatch(msg_id, "MCP-Protocol-Version", version, meta.protocol_version)
+
+        header_method = headers.get("mcp-method")
+        if header_method is None:
+            return _error(msg_id, HEADER_MISMATCH, "Header mismatch: Mcp-Method header is required")
+        if header_method != method:
+            return _mismatch(msg_id, "Mcp-Method", header_method, method)
+
+        expected = expected_name(method, params)
+        if method in NAME_SOURCES:
+            header_name = headers.get("mcp-name")
+            if header_name is None:
+                return _error(
+                    msg_id,
+                    HEADER_MISMATCH,
+                    f"Header mismatch: Mcp-Name header is required for {method}",
+                )
+            try:
+                decoded = decode_header_value(header_name)
+            except ValueError as exc:
+                return _error(msg_id, HEADER_MISMATCH, f"Header mismatch: {exc}")
+            if decoded != expected:
+                return _mismatch(msg_id, "Mcp-Name", decoded, expected)
+        return None
+
+    def _stateless_headers(
+        self, incoming: Mapping[str, str], original: JSON, forwarded: JSON
+    ) -> dict[str, str]:
+        out = {
+            k: v
+            for k, v in self._forward_headers(incoming).items()
+            if k.lower() not in {"mcp-session-id", "last-event-id", "content-type"}
+        }
+        out["content-type"] = "application/json"
+        if original.get("method") != "tools/call":
+            return out
+        params = forwarded.get("params") or {}
+        before = (original.get("params") or {}).get("arguments")
+        after = params.get("arguments")
+        mapping = self.sentinel.tool_param_headers.get(str(params.get("name", "")))
+        if not mapping or before == after or not isinstance(after, dict):
+            return out
+        # Redaction changed an argument the client mirrored into a header: keep
+        # header and body consistent, or the server would reject the request.
+        lowered = {k.lower(): k for k in out}
+        for header, path in mapping.items():
+            value = header_param_value(after, path)
+            existing = lowered.get(header)
+            if existing is not None:
+                del out[existing]
+            if value is not None:
+                out[header] = value
+        return out
+
+    def build_app(self) -> "FastAPI":
+        try:
+            from fastapi import FastAPI, Request, Response
+            from fastapi.responses import JSONResponse, StreamingResponse
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                "run: pip install 'mcp-rbac-gateway[server]' to use the HTTP proxy"
+            ) from exc
+
+        from .hitl import create_approval_router
+
+        app = FastAPI(title="mcp-rbac-gateway (stateless)", version=_version())
+        app.include_router(create_approval_router(self.sentinel.broker, self.approval_token))
+        proxy = self
+
+        def bad_request(body: JSON) -> Response:
+            return JSONResponse(body, status_code=400)
+
+        @app.get("/healthz")
+        async def healthz() -> dict[str, str]:
+            return {"status": "ok", "protocol": ",".join(proxy.supported_versions)}
+
+        @app.post(self.path)
+        async def post_mcp(request: Request) -> Response:
+            try:
+                agent = proxy.identify(request.headers)
+            except PermissionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=401)
+            try:
+                msg = json.loads(await request.body())
+            except json.JSONDecodeError:
+                return bad_request(_error(None, -32700, "Parse error"))
+            if isinstance(msg, list):
+                return bad_request(
+                    _error(None, -32600, "Invalid Request: send one JSON-RPC message per POST")
+                )
+            if not isinstance(msg, dict) or not isinstance(msg.get("method"), str):
+                return bad_request(
+                    _error(
+                        msg.get("id") if isinstance(msg, dict) else None,
+                        -32600,
+                        "Invalid Request: clients may only POST requests and notifications",
+                    )
+                )
+            problem = proxy.check_headers(request.headers, msg)
+            if problem is not None:
+                logger.info("rejected %s: %s", msg.get("method"), problem["error"]["message"])
+                return bad_request(problem)
+
+            interceptor = MessageInterceptor(
+                proxy.sentinel, agent_id=agent, transport="http-stateless"
+            )
+            try:
+                outcome = await interceptor.on_client_message(msg)
+            except Exception as exc:
+                logger.exception("error while checking client message")
+                return JSONResponse(_internal_error(msg.get("id"), exc))
+            if outcome.respond is not None:
+                return JSONResponse(outcome.respond)
+            forwarded = cast(JSON, outcome.forward)
+
+            import httpx
+
+            long_lived = msg.get("method") == "subscriptions/listen"
+            client = httpx.AsyncClient(
+                timeout=httpx.Timeout(proxy.timeout, read=None if long_lived else proxy.timeout),
+                transport=proxy._transport,
+            )
+            upstream_req = client.build_request(
+                "POST",
+                proxy.upstream_url,
+                content=json.dumps(forwarded).encode(),
+                headers=proxy._stateless_headers(request.headers, msg, forwarded),
+            )
+            upstream = await client.send(upstream_req, stream=True)
+            ctype = upstream.headers.get("content-type", "")
+            passthrough = {
+                k: v for k, v in upstream.headers.items() if k.lower() in {"x-accel-buffering"}
+            }
+
+            if ctype.startswith("text/event-stream"):
+
+                async def stream() -> AsyncIterator[bytes]:
+                    try:
+                        async for chunk in _filter_sse(upstream, interceptor):
+                            yield chunk
+                    finally:
+                        await upstream.aclose()
+                        await client.aclose()
+
+                passthrough.setdefault("x-accel-buffering", "no")
+                return StreamingResponse(
+                    stream(),
+                    status_code=upstream.status_code,
+                    media_type="text/event-stream",
+                    headers=passthrough,
+                )
+
+            raw = await upstream.aread()
+            await upstream.aclose()
+            await client.aclose()
+            if not raw or not ctype.startswith("application/json"):
+                return Response(raw, status_code=upstream.status_code, media_type=ctype or None)
+            data = json.loads(raw)
+            filtered = await interceptor.on_server_message(data)
+            return JSONResponse(filtered, status_code=upstream.status_code)
+
+        @app.api_route(self.path, methods=["GET", "DELETE"])
+        async def not_allowed() -> Response:
+            return Response(status_code=405, headers={"allow": "POST"})
+
+        return app
+
+
+def _error_data(msg_id: Any, code: int, message: str, data: Any) -> JSON:
+    body = _error(msg_id, code, message)
+    body["error"]["data"] = data
+    return body
+
+
+def _mismatch(msg_id: Any, header: str, header_value: Any, body_value: Any) -> JSON:
+    return _error(
+        msg_id,
+        HEADER_MISMATCH,
+        f"Header mismatch: {header} header value '{header_value}' does not match "
+        f"body value '{body_value}'",
+    )
 
 
 @dataclass

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 from .audit import AuditEvent, AuditLog
 from .config import SentinelConfig, load_config
@@ -19,9 +19,10 @@ from .hitl import (
     WebhookApprover,
     create_approval_router,
 )
+from .mcp import RequestMeta, TaskRegistry
 from .models import AuditDecision, CallVerdict, Finding, PolicyAction, PolicyDecision, ScanResult
 from .policy import PolicyEngine
-from .proxy import HttpProxy, MessageInterceptor, StdioProxy, guard
+from .proxy import HttpProxy, MessageInterceptor, StatelessHttpProxy, StdioProxy, guard
 from .scanner import Scanner
 
 __all__ = [
@@ -43,12 +44,15 @@ __all__ = [
     "PolicyAction",
     "PolicyDecision",
     "PolicyEngine",
+    "RequestMeta",
     "ResultCheck",
     "ScanResult",
     "Scanner",
     "Sentinel",
     "SentinelConfig",
+    "StatelessHttpProxy",
     "StdioProxy",
+    "TaskRegistry",
     "ToolBlockedError",
     "WebhookApprover",
     "__version__",
