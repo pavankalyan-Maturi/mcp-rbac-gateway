@@ -93,6 +93,14 @@ def wrap(
         int | None,
         typer.Option(help="Also serve the approval API on this port (webhook HITL mode)."),
     ] = None,
+    open_approvals: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unauthenticated-approvals",
+            help="Serve /approvals without a token (hitl.webhook.token_env unset). "
+            "Anyone who can reach the port can approve.",
+        ),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run a stdio MCP server behind the gateway.
@@ -112,6 +120,12 @@ def wrap(
     from .gateway import Sentinel
     from .proxy import StdioProxy
 
+    if approval_port and not _approval_token(cfg) and not open_approvals:
+        err.print(
+            "[red]approval API has no auth:[/] set hitl.webhook.token_env (and that variable), "
+            "or pass --allow-unauthenticated-approvals"
+        )
+        raise typer.Exit(2)
     sentinel = Sentinel(cfg)
     proxy = StdioProxy(
         sentinel, command, agent_id=agent, env=cfg.upstream.env, cwd=cfg.upstream.cwd
@@ -126,7 +140,9 @@ def wrap(
     async def main() -> int:
         server_task = None
         if approval_port:
-            server_task = asyncio.create_task(_serve_approvals(sentinel, cfg, approval_port))
+            server_task = asyncio.create_task(
+                _serve_approvals(sentinel, cfg, approval_port, open_approvals)
+            )
         try:
             return await proxy.run()
         finally:
@@ -142,19 +158,43 @@ def wrap(
     raise typer.Exit(code)
 
 
-async def _serve_approvals(sentinel: Any, cfg: SentinelConfig, port: int) -> None:
+def _approval_token(cfg: SentinelConfig) -> str | None:
+    token_env = cfg.hitl.webhook.token_env
+    return os.environ.get(token_env) if token_env else None
+
+
+async def _serve_approvals(
+    sentinel: Any, cfg: SentinelConfig, port: int, allow_unauthenticated: bool = False
+) -> None:
     import uvicorn
     from fastapi import FastAPI
 
     from .hitl import create_approval_router
 
-    token_env = cfg.hitl.webhook.token_env
     api = FastAPI(title="mcp-rbac-gateway approvals")
     api.include_router(
-        create_approval_router(sentinel.broker, os.environ.get(token_env) if token_env else None)
+        create_approval_router(
+            sentinel.broker,
+            _approval_token(cfg),
+            allow_unauthenticated=allow_unauthenticated,
+        )
     )
     server = uvicorn.Server(uvicorn.Config(api, host="127.0.0.1", port=port, log_level="warning"))
     await server.serve()
+
+
+def _build_or_exit(proxy: Any, sentinel: Any) -> Any:
+    try:
+        return proxy.build_app()
+    except ValueError as exc:
+        sentinel.close()
+        err.print(f"[red]{escape(str(exc))}[/]")
+        err.print("set hitl.webhook.token_env, or pass --allow-unauthenticated-approvals")
+        raise typer.Exit(2) from exc
+
+
+def _has_approvals(app_: Any) -> bool:
+    return any(getattr(r, "path", "").startswith("/approvals") for r in app_.routes)
 
 
 # -------------------------------------------------------------------- serve
@@ -172,6 +212,14 @@ def serve(
     agent: Annotated[
         str | None, typer.Option("--agent", "-a", help="Agent used when no header is sent.")
     ] = None,
+    open_approvals: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unauthenticated-approvals",
+            help="Serve /approvals without a token (hitl.webhook.token_env unset). "
+            "Anyone who can reach the port can approve.",
+        ),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run an HTTP (Streamable HTTP + legacy SSE) reverse proxy in front of an MCP server."""
@@ -187,26 +235,27 @@ def serve(
     from .proxy import HttpProxy
 
     sentinel = Sentinel(cfg)
-    token_env = cfg.hitl.webhook.token_env
     proxy = HttpProxy(
         sentinel,
         url,
         path=path,
         default_agent=agent,
         headers=cfg.upstream.headers,
-        approval_token=os.environ.get(token_env) if token_env else None,
+        approval_token=_approval_token(cfg),
+        allow_unauthenticated_approvals=open_approvals,
     )
+    app_ = _build_or_exit(proxy, sentinel)
     err.print(
         Panel.fit(
             f"[bold]mcp-rbac-gateway[/] {__version__}\n"
             f"proxy    http://{host}:{port}{path}  (legacy SSE: /sse)\n"
-            f"upstream {url}\n"
-            f"approvals http://{host}:{port}/approvals",
+            f"upstream {url}"
+            + (f"\napprovals http://{host}:{port}/approvals" if _has_approvals(app_) else ""),
             border_style="cyan",
         )
     )
     try:
-        uvicorn.run(proxy.build_app(), host=host, port=port, log_level="warning")
+        uvicorn.run(app_, host=host, port=port, log_level="warning")
     finally:
         sentinel.close()
 
@@ -223,9 +272,25 @@ def proxy_http(
     agent: Annotated[
         str | None, typer.Option("--agent", "-a", help="Agent used when no header is sent.")
     ] = None,
+    open_approvals: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unauthenticated-approvals",
+            help="Serve /approvals without a token (hitl.webhook.token_env unset). "
+            "Anyone who can reach the port can approve.",
+        ),
+    ] = False,
+    dual_era: Annotated[
+        bool,
+        typer.Option("--dual-era", help="Also serve 2025-era clients on the same endpoint."),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run a stateless Streamable HTTP proxy (MCP 2026-07-28: no initialize, no sessions)."""
+    """Run a stateless Streamable HTTP proxy (MCP 2026-07-28: no initialize, no sessions).
+
+    With [bold]--dual-era[/], 2025-era clients (initialize, sessions, SSE) are
+    served on the same endpoint, dispatched on the MCP-Protocol-Version header.
+    """
     _setup_logging(verbose)
     cfg = _load(config)
     url = upstream_url or cfg.upstream.url
@@ -236,30 +301,32 @@ def proxy_http(
 
     from .gateway import Sentinel
     from .mcp import SUPPORTED_STATELESS_VERSIONS
-    from .proxy import StatelessHttpProxy
+    from .proxy import DualHttpProxy, StatelessHttpProxy
 
     sentinel = Sentinel(cfg)
-    token_env = cfg.hitl.webhook.token_env
-    proxy = StatelessHttpProxy(
+    cls = DualHttpProxy if dual_era else StatelessHttpProxy
+    proxy = cls(
         sentinel,
         url,
         path=path,
         default_agent=agent,
         headers=cfg.upstream.headers,
-        approval_token=os.environ.get(token_env) if token_env else None,
+        approval_token=_approval_token(cfg),
+        allow_unauthenticated_approvals=open_approvals,
     )
+    app_ = _build_or_exit(proxy, sentinel)
     err.print(
         Panel.fit(
-            f"[bold]mcp-rbac-gateway[/] {__version__} (stateless)\n"
+            f"[bold]mcp-rbac-gateway[/] {__version__} ({'dual-era' if dual_era else 'stateless'})\n"
             f"proxy    http://{host}:{port}{path}  "
             f"(MCP {', '.join(SUPPORTED_STATELESS_VERSIONS)})\n"
-            f"upstream {url}\n"
-            f"approvals http://{host}:{port}/approvals",
+            f"upstream {url}"
+            + (f"\napprovals http://{host}:{port}/approvals" if _has_approvals(app_) else ""),
             border_style="cyan",
         )
     )
     try:
-        uvicorn.run(proxy.build_app(), host=host, port=port, log_level="warning")
+        uvicorn.run(app_, host=host, port=port, log_level="warning")
     finally:
         sentinel.close()
 

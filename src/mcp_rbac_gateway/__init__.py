@@ -39,7 +39,14 @@ from .models import (
     ToolDenial,
 )
 from .policy import PolicyEngine
-from .proxy import HttpProxy, MessageInterceptor, StatelessHttpProxy, StdioProxy, guard
+from .proxy import (
+    DualHttpProxy,
+    HttpProxy,
+    MessageInterceptor,
+    StatelessHttpProxy,
+    StdioProxy,
+    guard,
+)
 from .scanner import Scanner
 from .sync import run_sync
 
@@ -64,6 +71,7 @@ __all__ = [
     "CallbackApprover",
     "Finding",
     "MemoryApprovalStore",
+    "DualHttpProxy",
     "HttpProxy",
     "MessageInterceptor",
     "PolicyAction",

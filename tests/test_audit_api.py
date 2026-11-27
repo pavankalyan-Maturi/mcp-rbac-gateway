@@ -123,6 +123,7 @@ def tenant_from_header(request: Request) -> str | None:
 
 def make_app(log: AuditLog, **kwargs: object) -> TestClient:
     app = FastAPI()
+    kwargs.setdefault("allow_unauthenticated", "token" not in kwargs)
     app.include_router(create_audit_router(log, **kwargs))  # type: ignore[arg-type]
     return TestClient(app)
 

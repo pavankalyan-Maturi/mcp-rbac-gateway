@@ -255,7 +255,9 @@ def test_router_double_approve_and_scope(tmp_path: Path) -> None:
     with call_context(tenant_id="globex"):
         g = s.check_call_sync("ops", "delete_file", {"path": "/2"}, wait=False)
     app = FastAPI()
-    app.include_router(create_approval_router(s.broker, require_scope=tenant))
+    app.include_router(
+        create_approval_router(s.broker, require_scope=tenant, allow_unauthenticated=True)
+    )
     client = TestClient(app)
     acme_h, globex_h = {"x-tenant": "acme"}, {"x-tenant": "globex"}
 

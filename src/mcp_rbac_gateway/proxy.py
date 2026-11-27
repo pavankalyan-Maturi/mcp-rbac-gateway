@@ -26,7 +26,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import urljoin
@@ -54,6 +54,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "BLOCK_PREFIX",
+    "AgentResolver",
+    "ContextResolver",
+    "DualHttpProxy",
     "HttpProxy",
     "MessageInterceptor",
     "OnBlock",
@@ -69,6 +72,11 @@ OnBlock = Literal["raise", "return", "result"]
 F = TypeVar("F", bound=Callable[..., Any])
 
 JSON = dict[str, Any]
+
+#: ``agent_resolver(headers)``: the calling agent, None for the default; may be async.
+AgentResolver = Callable[[Mapping[str, str]], "str | None | Awaitable[str | None]"]
+#: ``context_resolver(headers, body)``: the request's context; may be async.
+ContextResolver = Callable[[Mapping[str, str], Any], "CallContext | Awaitable[CallContext]"]
 
 
 def _key(msg_id: Any) -> str:
@@ -116,6 +124,8 @@ class MessageInterceptor:
     transport: str = "stdio"
     session_id: str | None = None
     tasks: TaskRegistry | None = None
+    context: CallContext | None = None
+    """Request context put on every audit row (e.g. from ``context_resolver``)."""
     _calls: dict[str, _PendingCall] = field(default_factory=dict)
     _lists: set[str] = field(default_factory=set)
     _skill_lists: set[str] = field(default_factory=set)
@@ -174,10 +184,12 @@ class MessageInterceptor:
         if not isinstance(arguments, dict):
             arguments = {"_": arguments}
         started = time.perf_counter()
-        context = CallContext(
-            session_id=self.session_id,
-            request_id=str(msg["id"]),
-            traceparent=meta.traceparent,
+        context = (self.context or CallContext()).merged(
+            CallContext(
+                session_id=self.session_id,
+                request_id=str(msg["id"]),
+                traceparent=meta.traceparent,
+            )
         )
         verdict = await self.sentinel.check_call(self.agent, tool, arguments, context=context)
         if not verdict.allowed:
@@ -272,6 +284,7 @@ class MessageInterceptor:
             request_id=request_id,
             session_id=self.session_id,
             meta=meta,
+            context=self.context or CallContext(),
             **kw,
         )
 
@@ -719,6 +732,27 @@ class HttpProxy:
     Agent identity comes from the ``X-Sentinel-Agent`` header. If any agent in
     the config defines ``token_env``, callers must also prove their identity
     with ``X-Sentinel-Token``; the header alone is then never trusted.
+
+    Options for hosts:
+
+    * ``agent_resolver(headers) -> agent | None`` replaces that lookup, e.g.
+      to read the role from a claim of the caller's OAuth bearer token. None
+      means ``default_agent``; raising :class:`PermissionError` answers 401.
+      It may be async.
+    * ``context_resolver(headers, body) -> CallContext`` is called once per
+      request (``body`` is the parsed JSON-RPC message, or None on GET) and
+      its result goes on every audit row the request writes: tenant, labels,
+      session. Raising :class:`PermissionError` answers 401. It may be async.
+    * The approval API (``/approvals``) is mounted only when it is protected:
+      pass ``approval_token`` or ``approval_dependencies``, or
+      ``allow_unauthenticated_approvals=True`` to mount it open on purpose.
+      With ``hitl.mode`` ``webhook`` or ``api`` (calls wait for that API) and
+      none of these, :meth:`build_app` raises instead of serving it open.
+    * ``transport`` is the ``httpx`` transport used to reach the upstream.
+      Pass ``httpx.ASGITransport(app=upstream_app)`` to run the proxy in front
+      of an in-process ASGI app, for tests or a single-process deployment
+      (``upstream_url`` is then any URL on that app, e.g.
+      ``http://upstream/mcp``).
     """
 
     def __init__(
@@ -732,6 +766,10 @@ class HttpProxy:
         approval_token: str | None = None,
         timeout: float = 300.0,
         transport: Any = None,
+        agent_resolver: AgentResolver | None = None,
+        context_resolver: ContextResolver | None = None,
+        approval_dependencies: Sequence[Any] = (),
+        allow_unauthenticated_approvals: bool = False,
     ) -> None:
         self.sentinel = sentinel
         self.upstream_url = upstream_url
@@ -740,7 +778,11 @@ class HttpProxy:
         self.headers = dict(headers or {})
         self.approval_token = approval_token
         self.timeout = timeout
-        self._transport = transport  # httpx transport override, used by tests
+        self._transport = transport  # httpx transport for the upstream (see class docs)
+        self.agent_resolver = agent_resolver
+        self.context_resolver = context_resolver
+        self.approval_dependencies = list(approval_dependencies)
+        self.allow_unauthenticated_approvals = allow_unauthenticated_approvals
         self._sse_sessions: dict[str, _SseSession] = {}
         self._tokens = {
             os.environ[a.token_env]: name
@@ -766,6 +808,51 @@ class HttpProxy:
             return self.default_agent
         return headers.get("x-sentinel-agent") or self.default_agent
 
+    async def resolve_agent(self, headers: Mapping[str, str]) -> str | None:
+        """``agent_resolver`` if set, else :meth:`identify`. Raises ``PermissionError``."""
+        if self.agent_resolver is None:
+            return self.identify(headers)
+        agent = self.agent_resolver(headers)
+        if inspect.isawaitable(agent):
+            agent = await agent
+        return agent or self.default_agent
+
+    async def resolve_context(self, headers: Mapping[str, str], body: Any) -> CallContext | None:
+        """The request's :class:`CallContext` from ``context_resolver``, or None."""
+        if self.context_resolver is None:
+            return None
+        ctx = self.context_resolver(headers, body)
+        if inspect.isawaitable(ctx):
+            ctx = await ctx
+        return ctx
+
+    def include_approvals(self, app: Any) -> bool:
+        """Mount ``/approvals`` on ``app`` if it can be protected. Returns whether it was."""
+        from .hitl import create_approval_router
+
+        protected = bool(self.approval_token or self.approval_dependencies)
+        if not protected and not self.allow_unauthenticated_approvals:
+            if self.sentinel.config.hitl.enabled and self.sentinel.config.hitl.mode in (
+                "webhook",
+                "api",
+            ):
+                raise ValueError(
+                    f"hitl.mode is {self.sentinel.config.hitl.mode!r}, so calls wait for the "
+                    "approval API, but it has no auth: pass approval_token= or "
+                    "approval_dependencies=, or allow_unauthenticated_approvals=True"
+                )
+            logger.info("approval API not mounted: no approval_token or approval_dependencies")
+            return False
+        app.include_router(
+            create_approval_router(
+                self.sentinel.broker,
+                self.approval_token,
+                dependencies=self.approval_dependencies,
+                allow_unauthenticated=self.allow_unauthenticated_approvals,
+            )
+        )
+        return True
+
     def _client(self) -> Any:
         import httpx
 
@@ -778,7 +865,8 @@ class HttpProxy:
 
     # ---------------------------------------------------------------- app
 
-    def build_app(self) -> "FastAPI":
+    def build_app(self, *, approvals: bool = True) -> "FastAPI":
+        """The proxy as a FastAPI app. ``approvals=False`` never mounts ``/approvals``."""
         try:
             from fastapi import FastAPI, Request, Response
             from fastapi.responses import JSONResponse, StreamingResponse
@@ -787,10 +875,9 @@ class HttpProxy:
                 "run: pip install 'mcp-rbac-gateway[server]' to use the HTTP proxy"
             ) from exc
 
-        from .hitl import create_approval_router
-
         app = FastAPI(title="mcp-rbac-gateway", version=_version())
-        app.include_router(create_approval_router(self.sentinel.broker, self.approval_token))
+        if approvals:
+            self.include_approvals(app)
         proxy = self
 
         @app.get("/healthz")
@@ -800,7 +887,7 @@ class HttpProxy:
         @app.post(self.path)
         async def post_mcp(request: Request) -> Response:
             try:
-                agent = proxy.identify(request.headers)
+                agent = await proxy.resolve_agent(request.headers)
             except PermissionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=401)
             body = await request.body()
@@ -815,9 +902,17 @@ class HttpProxy:
                     },
                     status_code=400,
                 )
+            try:
+                context = await proxy.resolve_context(request.headers, payload)
+            except PermissionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=401)
             session = request.headers.get("mcp-session-id")
             interceptor = MessageInterceptor(
-                proxy.sentinel, agent_id=agent, transport="http", session_id=session
+                proxy.sentinel,
+                agent_id=agent,
+                transport="http",
+                session_id=session,
+                context=context,
             )
             items = payload if isinstance(payload, list) else [payload]
             forward: list[Any] = []
@@ -899,10 +994,16 @@ class HttpProxy:
             # Server-initiated stream: no tool calls originate here, but
             # responses may still arrive on it, so it is scanned too.
             try:
-                agent = proxy.identify(request.headers)
+                agent = await proxy.resolve_agent(request.headers)
             except PermissionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=401)
-            interceptor = MessageInterceptor(proxy.sentinel, agent_id=agent, transport="http")
+            try:
+                context = await proxy.resolve_context(request.headers, None)
+            except PermissionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=401)
+            interceptor = MessageInterceptor(
+                proxy.sentinel, agent_id=agent, transport="http", context=context
+            )
             client = proxy._client()
             req = client.build_request(
                 "GET", proxy.upstream_url, headers=proxy._forward_headers(request.headers)
@@ -937,11 +1038,15 @@ class HttpProxy:
         @app.get("/sse")
         async def legacy_sse(request: Request) -> Response:
             try:
-                agent = proxy.identify(request.headers)
+                agent = await proxy.resolve_agent(request.headers)
+            except PermissionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=401)
+            try:
+                context = await proxy.resolve_context(request.headers, None)
             except PermissionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=401)
             session = _SseSession(
-                MessageInterceptor(proxy.sentinel, agent_id=agent, transport="sse")
+                MessageInterceptor(proxy.sentinel, agent_id=agent, transport="sse", context=context)
             )
             client = proxy._client()
             req = client.build_request(
@@ -1130,7 +1235,8 @@ class StatelessHttpProxy(HttpProxy):
                 out[header] = value
         return out
 
-    def build_app(self) -> "FastAPI":
+    def build_app(self, *, approvals: bool = True) -> "FastAPI":
+        """The proxy as a FastAPI app. ``approvals=False`` never mounts ``/approvals``."""
         try:
             from fastapi import FastAPI, Request, Response
             from fastapi.responses import JSONResponse, StreamingResponse
@@ -1139,10 +1245,9 @@ class StatelessHttpProxy(HttpProxy):
                 "run: pip install 'mcp-rbac-gateway[server]' to use the HTTP proxy"
             ) from exc
 
-        from .hitl import create_approval_router
-
         app = FastAPI(title="mcp-rbac-gateway (stateless)", version=_version())
-        app.include_router(create_approval_router(self.sentinel.broker, self.approval_token))
+        if approvals:
+            self.include_approvals(app)
         proxy = self
 
         def bad_request(body: JSON) -> Response:
@@ -1155,7 +1260,7 @@ class StatelessHttpProxy(HttpProxy):
         @app.post(self.path)
         async def post_mcp(request: Request) -> Response:
             try:
-                agent = proxy.identify(request.headers)
+                agent = await proxy.resolve_agent(request.headers)
             except PermissionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=401)
             try:
@@ -1179,8 +1284,12 @@ class StatelessHttpProxy(HttpProxy):
                 logger.info("rejected %s: %s", msg.get("method"), problem["error"]["message"])
                 return bad_request(problem)
 
+            try:
+                context = await proxy.resolve_context(request.headers, msg)
+            except PermissionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=401)
             interceptor = MessageInterceptor(
-                proxy.sentinel, agent_id=agent, transport="http-stateless"
+                proxy.sentinel, agent_id=agent, transport="http-stateless", context=context
             )
             try:
                 outcome = await interceptor.on_client_message(msg)
@@ -1242,6 +1351,56 @@ class StatelessHttpProxy(HttpProxy):
             return Response(status_code=405, headers={"allow": "POST"})
 
         return app
+
+
+class DualHttpProxy(StatelessHttpProxy):
+    """One endpoint for both protocol eras.
+
+    A ``POST {path}`` whose ``MCP-Protocol-Version`` header names a stateless
+    revision (2026-07-28) takes the :class:`StatelessHttpProxy` path, header
+    checks included. Everything else takes the :class:`HttpProxy` path: a
+    2025-era ``initialize`` (which has no version header yet), later
+    requests in that session, ``GET``/``DELETE {path}`` and legacy ``/sse``.
+    Policy, audit and resolvers are shared, so both eras are governed the same.
+    Use it when the upstream server, like the MCP Python SDK 2.x, serves both
+    eras on one URL.
+    """
+
+    def build_app(self, *, approvals: bool = True) -> "FastAPI":
+        legacy = HttpProxy.build_app(self, approvals=approvals)
+        stateless = StatelessHttpProxy.build_app(self, approvals=False)
+        legacy.title = "mcp-rbac-gateway (dual-era)"
+        legacy.add_middleware(
+            _EraDispatch,
+            stateless=stateless,
+            path=self.path,
+            versions=frozenset(self.supported_versions),
+        )
+        return legacy
+
+
+class _EraDispatch:
+    """ASGI middleware: send modern POSTs on the MCP path to the stateless app."""
+
+    def __init__(self, app: Any, *, stateless: Any, path: str, versions: frozenset[str]) -> None:
+        self.app = app
+        self.stateless = stateless
+        self.path = path
+        self.versions = versions
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and scope.get("path") == self.path
+        ):
+            for key, value in scope.get("headers") or []:
+                if key.lower() == b"mcp-protocol-version":
+                    if value.decode("latin-1").strip() in self.versions:
+                        await self.stateless(scope, receive, send)
+                        return
+                    break
+        await self.app(scope, receive, send)
 
 
 def _error_data(msg_id: Any, code: int, message: str, data: Any) -> JSON:

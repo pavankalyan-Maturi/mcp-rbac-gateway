@@ -370,12 +370,24 @@ async def resolve_scope(require_scope: Callable[[Any], Any] | None, request: Any
     return None if scope is None else str(scope)
 
 
+def require_auth(
+    token: str | None, dependencies: Sequence[Any], allow_unauthenticated: bool, what: str
+) -> None:
+    """Refuse to build a router with no auth unless that is explicitly allowed."""
+    if not token and not dependencies and not allow_unauthenticated:
+        raise ValueError(
+            f"{what}: no token and no dependencies, so anyone could call it. Pass token=, "
+            "dependencies=[Depends(...)], or allow_unauthenticated=True"
+        )
+
+
 def create_approval_router(
     broker: ApprovalBroker,
     token: str | None = None,
     *,
     require_scope: Callable[[Any], Any] | None = None,
     dependencies: Sequence[Any] = (),
+    allow_unauthenticated: bool = False,
 ) -> APIRouter:
     """FastAPI router exposing pending approvals.
 
@@ -384,6 +396,10 @@ def create_approval_router(
     ``Authorization: Bearer <token>``. ``dependencies`` adds your own FastAPI
     dependencies (e.g. ``[Depends(current_user)]``) to every route.
 
+    Fails closed: with neither ``token`` nor ``dependencies`` it raises
+    :class:`ValueError`, unless ``allow_unauthenticated=True`` says an open
+    router is intended (a test, or auth enforced in front of the app).
+
     ``require_scope(request) -> tenant_id | None`` (sync or async) limits a
     caller to one tenant's approvals: others are listed as absent and answer
     ``404``. Deciding a request that was already decided or has expired
@@ -391,6 +407,7 @@ def create_approval_router(
     """
     from .api import approval_routes
 
+    require_auth(token, dependencies, allow_unauthenticated, "create_approval_router")
     router: APIRouter = approval_routes(
         broker, token, require_scope=require_scope, dependencies=dependencies
     )

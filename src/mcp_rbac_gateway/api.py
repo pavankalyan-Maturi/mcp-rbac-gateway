@@ -22,6 +22,7 @@ def create_audit_router(
     require_scope: Callable[[Any], Any] | None = None,
     dependencies: Sequence[Any] = (),
     prefix: str = "/audit",
+    allow_unauthenticated: bool = False,
 ) -> Any:
     """FastAPI router with ``GET /audit``: a read-only, tenant-safe view of the audit trail.
 
@@ -36,12 +37,17 @@ def create_audit_router(
             who may see every tenant. Raise ``HTTPException`` to refuse.
         dependencies: Extra FastAPI dependencies (``[Depends(my_auth)]``), so
             you can reuse your own authentication instead of ``token``.
+        allow_unauthenticated: Without ``token`` or ``dependencies`` the
+            router refuses to build (:class:`ValueError`) unless this is True.
 
     Query parameters: ``agent``, ``tool``, ``decision``, ``method``,
     ``blocked_only``, ``since`` (Unix time), ``session_id``, ``request_id``,
     ``tenant_id``, ``trace_id``, ``limit`` (1-500, default 100) and
     ``before_id`` (keyset cursor). The response is an :class:`AuditPage`.
     """
+    from .hitl import require_auth
+
+    require_auth(token, dependencies, allow_unauthenticated, "create_audit_router")
     try:
         from fastapi import APIRouter, Depends, Query, Request
     except ImportError as exc:  # pragma: no cover

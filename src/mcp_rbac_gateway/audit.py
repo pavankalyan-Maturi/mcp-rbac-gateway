@@ -628,10 +628,16 @@ def create_audit_router(
     require_scope: Callable[[Any], Any] | None = None,
     dependencies: Sequence[Any] = (),
     prefix: str = "/audit",
+    allow_unauthenticated: bool = False,
 ) -> Any:
     """FastAPI router with ``GET /audit``. See :func:`mcp_rbac_gateway.api.create_audit_router`."""
     from .api import create_audit_router as create
 
     return create(
-        audit, token, require_scope=require_scope, dependencies=dependencies, prefix=prefix
+        audit,
+        token,
+        require_scope=require_scope,
+        dependencies=dependencies,
+        prefix=prefix,
+        allow_unauthenticated=allow_unauthenticated,
     )
