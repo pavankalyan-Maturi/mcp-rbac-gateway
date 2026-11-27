@@ -64,9 +64,15 @@ def as_text(value: Any) -> str:
 
 @dataclass
 class EffectivePolicy:
-    """An agent's rules after inheritance has been flattened."""
+    """An agent's rules after inheritance has been flattened.
+
+    Lists are concatenated along the inheritance chain (depth first). Since
+    ``deny`` is checked before ``allow``, a deny anywhere in the chain wins:
+    a child cannot re-allow a tool its parent denies.
+    """
 
     agent_id: str
+    chain: list[str] = field(default_factory=list)
     allow: list[str] = field(default_factory=list)
     deny: list[str] = field(default_factory=list)
     require_approval: list[str] = field(default_factory=list)
@@ -107,6 +113,7 @@ class PolicyEngine:
         agent: AgentPolicy | None = self.config.agents.get(name)
         if agent is None:
             return
+        out.chain.append(name)
         out.allow.extend(agent.allow)
         out.deny.extend(agent.deny)
         out.require_approval.extend(agent.require_approval)

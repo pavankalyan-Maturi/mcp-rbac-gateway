@@ -164,10 +164,54 @@ class Sentinel:
                 else:
                     self.tool_param_headers.pop(name, None)
 
+    @overload
+    def visible_tools(self, agent_id: str | None, tools: Iterable[str]) -> list[str]: ...
+
+    @overload
     def visible_tools(
         self, agent_id: str | None, tools: Iterable[Mapping[str, Any]]
-    ) -> list[Mapping[str, Any]]:
-        return self.policy.filter_tools(agent_id, tools)
+    ) -> list[Mapping[str, Any]]: ...
+
+    def visible_tools(
+        self, agent_id: str | None, tools: Iterable[str] | Iterable[Mapping[str, Any]]
+    ) -> list[str] | list[Mapping[str, Any]]:
+        """The tools ``agent_id`` may see, in the order given.
+
+        Pass tool names (``["read_file", "shell"]``) to get names back, or MCP
+        tool descriptors (``{"name": ...}``) to get the descriptors back. Use it
+        to build the tool list you hand the model, so it never sees a tool the
+        policy would refuse. A tool is visible unless a ``deny`` rule matches
+        (anywhere in the inheritance chain), and then only if an ``allow`` rule
+        matches or ``default_action`` is ``allow``. Tools that need approval
+        are visible.
+        """
+        agent = self.agent_or_default(agent_id)
+        out: list[Any] = []
+        for tool in tools:
+            name = tool if isinstance(tool, str) else str(tool.get("name", ""))
+            if self.policy.is_tool_visible(agent, name):
+                out.append(tool)
+        return out
+
+    def needs_approval(
+        self, agent_id: str | None, tool: str, arguments: Mapping[str, Any] | None = None
+    ) -> str | None:
+        """Why this call would wait for a human, or None.
+
+        None also when the call would be blocked anyway (policy deny, or a
+        prompt-injection block), so a host can show "needs approval" only for
+        calls that can actually go through. Nothing is audited or stored.
+        """
+        agent = self.agent_or_default(agent_id)
+        raw_args = dict(arguments or {})
+        decision = self.policy.evaluate(agent, tool, raw_args)
+        if decision.action is PolicyAction.DENY:
+            return None
+        inj = self.config.scanner.prompt_injection
+        if self.config.scanner.scan_inputs_for_injection and inj.action == "block":
+            if self.scanner.is_injection(self.scanner.scan_input(raw_args).injection_score):
+                return None
+        return self.gate.approval_reason(tool, raw_args, decision, self.tool_annotations.get(tool))
 
     @staticmethod
     def resolve_context(context: CallContext | None = None) -> CallContext:

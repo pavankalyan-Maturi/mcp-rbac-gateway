@@ -485,6 +485,69 @@ def validate(config: ConfigOpt = Path("sentinel.yaml")) -> None:
     )
 
 
+# ------------------------------------------------------------- check-policy
+
+
+@app.command("check-policy")
+def check_policy(
+    config: Annotated[Path, typer.Argument(help="Path to sentinel.yaml.")] = Path("sentinel.yaml"),
+    tools: Annotated[
+        list[str] | None,
+        typer.Option("--tool", "-t", help="Also show the decision for this tool (repeatable)."),
+    ] = None,
+    agent: Annotated[
+        list[str] | None, typer.Option("--agent", "-a", help="Only these agents (repeatable).")
+    ] = None,
+) -> None:
+    """Show each agent's effective allow/deny after inheritance.
+
+    Deny always wins: a tool denied anywhere in an agent's inheritance chain
+    stays denied even if the agent itself allows it. With [bold]--tool[/], prints
+    the decision (allow / deny / approval) per agent for each tool, with no
+    arguments.
+    """
+    cfg = _load(config)
+    from .hitl import ApprovalGate
+    from .policy import PolicyEngine
+
+    engine = PolicyEngine(cfg)
+    gate = ApprovalGate(cfg.hitl, approver=_NoopApprover())
+    names = agent or list(cfg.agents)
+    unknown = [n for n in names if n not in cfg.agents]
+    if unknown:
+        raise typer.BadParameter(f"unknown agent(s): {', '.join(unknown)}")
+
+    table = Table(title=f"effective policy: {config}", box=box.ROUNDED)
+    for col in ("agent", "inherits", "allow", "deny", "approval"):
+        table.add_column(col, overflow="fold")
+    for tool in tools or []:
+        table.add_column(escape(tool), justify="center")
+    marks = {"allow": "[green]allow[/]", "deny": "[red]deny[/]", "approval": "[yellow]approval[/]"}
+    for name in names:
+        eff = engine.effective_policy(name)
+        row: list[str | Text] = [
+            escape(name) + (" [dim](default)[/]" if name == cfg.default_agent else ""),
+            Text(" > ".join(eff.chain[1:]) or "-"),
+            Text(", ".join(dict.fromkeys(eff.allow)) or "-"),
+            Text(", ".join(dict.fromkeys(eff.deny)) or "-"),
+            Text(", ".join(dict.fromkeys(eff.require_approval)) or "-"),
+        ]
+        for tool in tools or []:
+            decision = engine.evaluate(name, tool, {})
+            if not decision.allowed:
+                row.append(marks["deny"])
+            elif gate.approval_reason(tool, {}, decision):
+                row.append(marks["approval"])
+            else:
+                row.append(marks["allow"])
+        table.add_row(*row)
+    out.print(table)
+    out.print(
+        f"default_action=[bold]{cfg.default_action}[/] (tools no rule matches)  "
+        "deny wins over allow along the inheritance chain"
+    )
+
+
 # -------------------------------------------------------------------- check
 
 
