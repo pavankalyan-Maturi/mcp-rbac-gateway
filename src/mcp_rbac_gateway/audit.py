@@ -8,6 +8,26 @@ never becomes a second copy of the secrets it is meant to protect.
 Writes run in a worker thread (``asyncio.to_thread``) so the event loop is
 never blocked by disk I/O. The database uses WAL mode, which lets
 ``mcp-rbac-gateway report`` read while a proxy is writing.
+
+Schema contract
+---------------
+From 0.3.0 the ``events`` table is a **public, versioned schema**. Its
+version is stored in ``PRAGMA user_version`` (:data:`SCHEMA_VERSION`) and the
+database is migrated forward when it is opened. Changes are additive:
+columns are added, never renamed, retyped or removed, without a major
+version bump, and every change is listed in the changelog. A database
+written by a newer version than the installed library is refused rather
+than silently misread. Use :meth:`AuditLog.query` where you can; reading the
+table with your own SQL is supported too.
+
+=========  =======  ==========================================================
+version    release  change
+=========  =======  ==========================================================
+1          0.1.0    initial ``events`` table
+2          0.2.0    ``method``, ``protocol_version``, ``client_name``,
+                    ``client_version``, ``traceparent``, ``tracestate``, ``meta``
+3          0.3.0    ``tenant_id``, ``labels``, ``approval_id``
+=========  =======  ==========================================================
 """
 
 from __future__ import annotations
@@ -17,7 +37,7 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -27,7 +47,18 @@ from pydantic import BaseModel, Field
 from .config import AuditConfig
 from .models import AuditDecision, Finding
 
-__all__ = ["AgentStats", "AuditEvent", "AuditLog", "AuditSummary", "ToolStats"]
+__all__ = [
+    "SCHEMA_VERSION",
+    "AgentStats",
+    "AuditEvent",
+    "AuditLog",
+    "AuditPage",
+    "AuditSummary",
+    "ToolStats",
+    "create_audit_router",
+]
+
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -66,6 +97,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("meta", "TEXT"),
     ("tenant_id", "TEXT"),
     ("labels", "TEXT"),
+    ("approval_id", "TEXT"),
 )
 _ADDED_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_events_trace ON events (traceparent)",
@@ -104,10 +136,20 @@ class AuditEvent(BaseModel):
     )
     tenant_id: str | None = None
     labels: dict[str, str] = Field(default_factory=dict)
+    approval_id: str | None = Field(
+        default=None, description="The approval request this row belongs to, if any."
+    )
 
     @property
     def redactions(self) -> int:
         return sum(1 for f in self.findings if f.kind != "injection")
+
+
+class AuditPage(BaseModel):
+    events: list[AuditEvent]
+    next_before_id: int | None = Field(
+        default=None, description="Pass as before_id to get the next page; None on the last page."
+    )
 
 
 class ToolStats(BaseModel):
@@ -172,12 +214,25 @@ class AuditLog:
             self._conn.commit()
 
     def _migrate(self) -> None:
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"audit database {self.path} has schema version {version}, but this "
+                f"mcp-rbac-gateway only knows version {SCHEMA_VERSION}: upgrade the package"
+            )
         have = {row[1] for row in self._conn.execute("PRAGMA table_info(events)")}
         for name, ddl in _ADDED_COLUMNS:
             if name not in have:
                 self._conn.execute(f"ALTER TABLE events ADD COLUMN {name} {ddl}")
         for sql in _ADDED_INDEXES:
             self._conn.execute(sql)
+        if version != SCHEMA_VERSION:
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    @property
+    def schema_version(self) -> int:
+        rows = self._fetch("PRAGMA user_version", [])
+        return int(rows[0][0])
 
     @classmethod
     def from_config(cls, config: AuditConfig) -> AuditLog:
@@ -207,9 +262,9 @@ class AuditLog:
                    transport, request_id, session_id, approver, arguments, result, findings,
                    redactions, injection_score, is_error, method, protocol_version,
                    client_name, client_version, traceparent, tracestate, meta,
-                   tenant_id, labels)
+                   tenant_id, labels, approval_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     event.ts,
                     event.agent_id,
@@ -236,6 +291,7 @@ class AuditLog:
                     meta,
                     event.tenant_id,
                     json.dumps(event.labels) if event.labels else None,
+                    event.approval_id,
                 ),
             )
             row_id = cur.lastrowid
@@ -258,29 +314,48 @@ class AuditLog:
         limit: int = 100,
         method: str | None = None,
         trace_id: str | None = None,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+        request_id: str | None = None,
+        before_id: int | None = None,
     ) -> list[AuditEvent]:
-        """Most recent events first. ``trace_id`` matches the W3C trace id in ``traceparent``."""
-        sql, params = self._where(agent_id, tool, decision, since, blocked_only)
-        extra: list[str] = []
-        if method:
-            extra.append("method = ?")
-            params.append(method)
-        if trace_id:
-            extra.append("traceparent LIKE ?")
-            params.append(f"__-{trace_id}-%")
-        if extra:
-            sql = (sql + " AND " if sql else "WHERE ") + " AND ".join(extra)
-        rows = self._fetch(
-            f"SELECT * FROM events {sql} ORDER BY ts DESC, id DESC LIMIT ?",
-            [
-                *params,
-                limit,
-            ],
+        """Most recent events first (by row id), filtered by every argument given.
+
+        ``trace_id`` matches the W3C trace id inside ``traceparent``.
+        ``before_id`` returns only rows with a smaller id: pass the last id of
+        one page to get the next. Keyset pagination stays stable while new
+        rows are written, unlike an offset.
+        """
+        sql, params = self._where(
+            agent_id=agent_id,
+            tool=tool,
+            decision=decision,
+            since=since,
+            blocked_only=blocked_only,
+            method=method,
+            trace_id=trace_id,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            request_id=request_id,
+            before_id=before_id,
         )
+        rows = self._fetch(f"SELECT * FROM events {sql} ORDER BY id DESC LIMIT ?", [*params, limit])
         return [self._to_event(r) for r in rows]
 
-    def summary(self, *, since: float | None = None, agent_id: str | None = None) -> AuditSummary:
-        where, params = self._where(agent_id, None, None, since, False)
+    def page(self, *, limit: int = 100, **filters: Any) -> AuditPage:
+        """:meth:`query` plus the cursor for the next page."""
+        events = self.query(limit=limit, **filters)
+        next_id = events[-1].id if len(events) == limit and events else None
+        return AuditPage(events=events, next_before_id=next_id)
+
+    def summary(
+        self,
+        *,
+        since: float | None = None,
+        agent_id: str | None = None,
+        tenant_id: str | None = None,
+    ) -> AuditSummary:
+        where, params = self._where(agent_id=agent_id, since=since, tenant_id=tenant_id)
         rows = self._fetch(
             f"SELECT agent_id, tool, decision, latency_ms, redactions, injection_score, ts "
             f"FROM events {where}",
@@ -356,26 +431,44 @@ class AuditLog:
 
     @staticmethod
     def _where(
-        agent_id: str | None,
-        tool: str | None,
-        decision: AuditDecision | str | None,
-        since: float | None,
-        blocked_only: bool,
+        *,
+        agent_id: str | None = None,
+        tool: str | None = None,
+        decision: AuditDecision | str | None = None,
+        since: float | None = None,
+        blocked_only: bool = False,
+        method: str | None = None,
+        trace_id: str | None = None,
+        session_id: str | None = None,
+        tenant_id: str | None = None,
+        request_id: str | None = None,
+        before_id: int | None = None,
     ) -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
-        if agent_id:
-            clauses.append("agent_id = ?")
-            params.append(agent_id)
-        if tool:
-            clauses.append("tool = ?")
-            params.append(tool)
+        for column, value in (
+            ("agent_id", agent_id),
+            ("tool", tool),
+            ("method", method),
+            ("session_id", session_id),
+            ("tenant_id", tenant_id),
+            ("request_id", request_id),
+        ):
+            if value is not None and value != "":
+                clauses.append(f"{column} = ?")
+                params.append(value)
         if decision:
             clauses.append("decision = ?")
             params.append(decision.value if isinstance(decision, AuditDecision) else decision)
         if since is not None:
             clauses.append("ts >= ?")
             params.append(since)
+        if trace_id:
+            clauses.append("traceparent LIKE ?")
+            params.append(f"__-{trace_id}-%")
+        if before_id is not None:
+            clauses.append("id < ?")
+            params.append(before_id)
         if blocked_only:
             blocked = [d.value for d in AuditDecision if d.is_block]
             clauses.append(f"decision IN ({','.join('?' * len(blocked))})")
@@ -423,8 +516,28 @@ class AuditLog:
             meta=_as_dict(load(row["meta"])),
             tenant_id=row["tenant_id"],
             labels=_as_dict(load(row["labels"])) or {},
+            approval_id=row["approval_id"],
         )
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
+
+
+# --------------------------------------------------------------------- HTTP API
+
+
+def create_audit_router(
+    audit: AuditLog,
+    token: str | None = None,
+    *,
+    require_scope: Callable[[Any], Any] | None = None,
+    dependencies: Sequence[Any] = (),
+    prefix: str = "/audit",
+) -> Any:
+    """FastAPI router with ``GET /audit``. See :func:`mcp_rbac_gateway.api.create_audit_router`."""
+    from .api import create_audit_router as create
+
+    return create(
+        audit, token, require_scope=require_scope, dependencies=dependencies, prefix=prefix
+    )

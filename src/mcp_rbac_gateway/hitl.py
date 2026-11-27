@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from fnmatch import fnmatchcase
 from typing import IO, TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -285,30 +285,57 @@ class ApprovalDecisionBody(BaseModel):
     comment: str | None = None
 
 
-def create_approval_router(broker: ApprovalBroker, token: str | None = None) -> APIRouter:
-    """FastAPI router exposing pending approvals.
-
-    ``GET /approvals``, ``GET /approvals/{id}``, ``POST /approvals/{id}/approve``
-    and ``POST /approvals/{id}/deny``. When ``token`` is set, requests must send
-    ``Authorization: Bearer <token>``.
-    """
-    try:
-        from fastapi import APIRouter, Depends, Header, HTTPException
-    except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "run: pip install 'mcp-rbac-gateway[server]' to use the approval API"
-        ) from exc
-
+def bearer_dependency(token: str | None, what: str) -> Callable[..., None]:
+    """A FastAPI dependency that checks ``Authorization: Bearer <token>`` (no-op if None)."""
     import hmac
+
+    from fastapi import Header, HTTPException
 
     def check_token(authorization: str | None = Header(default=None)) -> None:
         if token is None:
             return
         expected = f"Bearer {token}"
         if authorization is None or not hmac.compare_digest(authorization, expected):
-            raise HTTPException(status_code=401, detail="invalid approval token")
+            raise HTTPException(status_code=401, detail=f"invalid {what} token")
 
-    router = APIRouter(prefix="/approvals", tags=["approvals"], dependencies=[Depends(check_token)])
+    return check_token
+
+
+async def resolve_scope(require_scope: Callable[[Any], Any] | None, request: Any) -> str | None:
+    """Run a host's ``require_scope(request)`` hook (sync or async)."""
+    if require_scope is None:
+        return None
+    scope = require_scope(request)
+    if inspect.isawaitable(scope):
+        scope = await scope
+    return None if scope is None else str(scope)
+
+
+def create_approval_router(
+    broker: ApprovalBroker,
+    token: str | None = None,
+    *,
+    dependencies: Sequence[Any] = (),
+) -> APIRouter:
+    """FastAPI router exposing pending approvals.
+
+    ``GET /approvals``, ``GET /approvals/{id}``, ``POST /approvals/{id}/approve``
+    and ``POST /approvals/{id}/deny``. When ``token`` is set, requests must send
+    ``Authorization: Bearer <token>``. ``dependencies`` adds your own FastAPI
+    dependencies (e.g. ``[Depends(current_user)]``) to every route.
+    """
+    try:
+        from fastapi import APIRouter, Depends, HTTPException
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "run: pip install 'mcp-rbac-gateway[server]' to use the approval API"
+        ) from exc
+
+    router = APIRouter(
+        prefix="/approvals",
+        tags=["approvals"],
+        dependencies=[Depends(bearer_dependency(token, "approval")), *dependencies],
+    )
 
     @router.get("", response_model=list[ApprovalRequest])
     async def list_pending() -> list[ApprovalRequest]:

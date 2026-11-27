@@ -4,7 +4,7 @@ from __future__ import annotations
 
 __version__ = "0.2.0"
 
-from .audit import AuditEvent, AuditLog
+from .audit import AuditEvent, AuditLog, AuditPage, create_audit_router
 from .config import SentinelConfig, load_config
 from .context import CallContext, call_context, current_call_context
 from .gateway import ResultCheck, Sentinel, ToolBlockedError, agent_context, current_agent
@@ -36,6 +36,7 @@ __all__ = [
     "AuditDecision",
     "AuditEvent",
     "AuditLog",
+    "AuditPage",
     "AutoApprover",
     "CallContext",
     "CLIApprover",
@@ -62,6 +63,7 @@ __all__ = [
     "agent_context",
     "call_context",
     "create_approval_router",
+    "create_audit_router",
     "current_agent",
     "current_call_context",
     "guard",
