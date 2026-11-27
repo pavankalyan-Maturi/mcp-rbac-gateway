@@ -248,7 +248,7 @@ class TasksConfig(_Strict):
 
 
 class UpstreamConfig(_Strict):
-    """The real MCP server that sentinel protects."""
+    """The real MCP server that the gateway protects."""
 
     command: list[str] | None = Field(default=None, description="stdio server command + args.")
     env: dict[str, str] = Field(default_factory=dict)
@@ -310,7 +310,7 @@ class SentinelConfig(_Strict):
     def from_yaml_string(cls, text: str) -> SentinelConfig:
         data = yaml.safe_load(text) or {}
         if not isinstance(data, dict):
-            raise ValueError("sentinel config must be a YAML mapping")
+            raise ValueError("config must be a YAML mapping")
         return cls.model_validate(_expand_env(data))
 
 

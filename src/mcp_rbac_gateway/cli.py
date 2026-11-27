@@ -95,7 +95,7 @@ def wrap(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """Run a stdio MCP server behind sentinel.
+    """Run a stdio MCP server behind the gateway.
 
     The upstream command comes from [bold]upstream.command[/] in the config,
     or from everything after [bold]--[/]:
@@ -117,7 +117,7 @@ def wrap(
         sentinel, command, agent_id=agent, env=cfg.upstream.env, cwd=cfg.upstream.cwd
     )
     logging.getLogger("mcp_rbac_gateway").info(
-        "sentinel guarding [bold]%s[/] as agent [bold]%s[/]",
+        "mcp-rbac-gateway guarding [bold]%s[/] as agent [bold]%s[/]",
         " ".join(command),
         sentinel.agent_or_default(agent),
         extra={"markup": True},
@@ -495,7 +495,7 @@ def check(
     config: ConfigOpt = Path("sentinel.yaml"),
     agent: Annotated[str | None, typer.Option("--agent", "-a")] = None,
 ) -> None:
-    """Dry-run: show what sentinel would decide for a call (no approval prompt, no audit)."""
+    """Dry-run: show what the gateway would decide for a call (no approval prompt, no audit)."""
     cfg = _load(config)
     from .hitl import ApprovalGate
     from .policy import PolicyEngine

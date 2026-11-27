@@ -1,6 +1,6 @@
 """SQLite audit trail.
 
-Every tool invocation that passes through sentinel produces exactly one row,
+Every tool invocation that passes through the gateway produces one row,
 whether it was allowed, blocked by policy, stopped by the scanner, or decided
 by a human. Arguments are stored *after* redaction, so the audit database
 never becomes a second copy of the secrets it is meant to protect.

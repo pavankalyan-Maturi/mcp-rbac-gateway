@@ -82,7 +82,7 @@ class ScanResult(BaseModel):
 
 
 class CallVerdict(BaseModel):
-    """Everything sentinel decided about one tool call *before* it runs."""
+    """Everything the gateway decided about one tool call *before* it runs."""
 
     agent_id: str
     tool: str = Field(description="Tool name, or the target of another method (skill, task).")

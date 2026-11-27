@@ -830,7 +830,7 @@ class HttpProxy:
                     forward.append(outcome.forward)
 
             if not forward:
-                # Every request was answered by sentinel itself.
+                # Every request was answered by the gateway itself.
                 return JSONResponse(local if isinstance(payload, list) else local[0])
 
             upstream_body = forward if isinstance(payload, list) else forward[0]
@@ -969,7 +969,7 @@ class HttpProxy:
                     await client.aclose()
 
             async def merged() -> AsyncIterator[bytes]:
-                # Interleave upstream events with responses sentinel generates itself.
+                # Interleave upstream events with responses the gateway generates itself.
                 queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
                 async def pump() -> None:
@@ -1311,7 +1311,7 @@ def guard(
     on_block: OnBlock = "raise",
     context: CallContext | None = None,
 ) -> Callable[[F], F]:
-    """Protect a Python tool function with the full sentinel pipeline.
+    """Protect a Python tool function with the full gateway pipeline.
 
     Works on ``async def`` and plain functions. Place it *under* framework
     decorators such as LangChain's ``@tool`` so the framework sees the guarded

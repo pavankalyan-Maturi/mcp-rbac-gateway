@@ -80,7 +80,7 @@ def agent_context(agent_id: str) -> Iterator[None]:
 
 
 class ToolBlockedError(PermissionError):
-    """Raised by guarded functions when sentinel blocks a call."""
+    """Raised by guarded functions when the gateway blocks a call."""
 
     def __init__(self, verdict: CallVerdict | None, reason: str, decision: AuditDecision):
         super().__init__(f"[mcp-rbac-gateway] {decision.value}: {reason}")
