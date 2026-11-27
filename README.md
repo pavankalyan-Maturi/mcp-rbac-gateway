@@ -20,7 +20,7 @@ YAML file:
 agent ──► mcp-rbac-gateway ──► MCP server / Python tool
            ├─ policy     who may call which tool, with which arguments
            ├─ scanner    redact secrets & PII both ways, catch prompt injection
-           ├─ approval   pause risky calls for a human (CLI or webhook)
+           ├─ approval   pause risky calls for a human (CLI, webhook or your own API)
            └─ audit      every call, decision and latency in SQLite
 ```
 
@@ -47,6 +47,8 @@ Both paths share the same engine, so a rule behaves the same way whichever route
 - [Human-in-the-loop approvals](#human-in-the-loop-approvals)
 - [Stateless MCP (2026-07-28)](#stateless-mcp-2026-07-28)
 - [Python API & decorator](#python-api--decorator)
+- [Multi-tenant hosts](#multi-tenant-hosts)
+- [Performance](#performance)
 - [Audit trail & dashboard](#audit-trail--dashboard)
 - [CLI reference](#cli-reference)
 - [Examples](#examples)
@@ -294,7 +296,9 @@ from the environment.
 | `scanner.prompt_injection` | `block @ 0.7` | `enabled`, `action: warn\|block`, `threshold`, `extra_patterns`. |
 | `scanner.scan_inputs_for_injection` | `false` | Also score arguments for injection. |
 | `scanner.strip_invisible` | `true` | Strip zero-width and Unicode tag characters from results. |
-| `hitl.mode` | `cli` | `cli`, `webhook`, `auto_approve`, `auto_deny`. |
+| `hitl.mode` | `cli` | `cli`, `webhook`, `api`, `auto_approve`, `auto_deny`. See [which mode](#which-mode-when-you-mount-the-router). |
+| `hitl.store` | `memory` | Where pending approvals live: `memory` (this process) or `sqlite` (survives restarts, shared by every process using the file). |
+| `hitl.store_path` | `audit.path` | SQLite file for `store: sqlite`. |
 | `hitl.timeout_seconds` | `300` | After this, the call is blocked (`approval_timeout`). |
 | `hitl.tools` | `[]` | Tool globs that always need approval, for every agent. |
 | `hitl.rules` | `[]` | `{tool, when: {arg: regex}, reason}` for approval that depends on arguments. |
@@ -302,6 +306,8 @@ from the environment.
 | `hitl.webhook` | - | `url`, `headers`, `callback_base_url`, `token_env`. |
 | `audit.path` | `.sentinel/audit.db` | SQLite file. |
 | `audit.log_arguments` / `log_results` | `true` / `false` | What to store (always after redaction). |
+| `audit.writer` | `sync` | `sync`: one committed transaction per row. `batched`: a bounded queue and a background writer; see [Performance](#performance). |
+| `audit.batch_size` / `flush_interval_ms` / `queue_size` | `100` / `50` / `10000` | Batched writer tuning. A full queue blocks the caller; rows are never dropped. |
 | `tasks.bind_to_agent` | `true` | Only the agent whose `tools/call` created a task may get, update or cancel it. |
 | `tasks.ttl_seconds` | `3600` | How long the gateway remembers which agent owns a task. |
 | `upstream.command` / `url` | - | Default upstream for `wrap` / `serve` / `proxy-http`. |
@@ -327,6 +333,52 @@ Rules are evaluated in a fixed order, so you can predict the outcome without run
 denies and argument constraints. Constraints add up, so a child cannot replace a
 parent's `pattern` with a weaker one. If two roles need different constraints, inherit
 from a common, smaller parent (see `ops-agent` in the example config).
+
+**Deny wins along the whole chain.** If a parent denies `X`, no child can allow `X`, not
+even with an exact `allow: ["X"]` or `allow: ["*"]`. To give one role a tool its parent
+denies, move the deny out of the shared parent into the roles that need it.
+
+```yaml
+# roles.yaml
+default_agent: base
+agents:
+  base:
+    allow: ["read_*", "search"]
+    deny: ["read_secrets"]
+  writer:
+    inherits: [base]
+    allow: ["write_file", "read_secrets"]
+    require_approval: ["write_file"]
+  admin:
+    inherits: [writer]
+    allow: ["*"]
+    deny: ["drop_*"]
+```
+
+```text
+$ mcp-rbac-gateway check-policy roles.yaml -t read_secrets -t write_file -t drop_table
+effective policy: roles.yaml
+╭────────────────┬───────────────┬────────────────────────────┬──────────────────────┬────────────┬──────────────┬────────────┬────────────╮
+│ agent          │ inherits      │ allow                      │ deny                 │ approval   │ read_secrets │ write_file │ drop_table │
+├────────────────┼───────────────┼────────────────────────────┼──────────────────────┼────────────┼──────────────┼────────────┼────────────┤
+│ base (default) │ -             │ read_*, search             │ read_secrets         │ -          │     deny     │    deny    │    deny    │
+│ writer         │ base          │ write_file, read_secrets,  │ read_secrets         │ write_file │     deny     │  approval  │    deny    │
+│                │               │ read_*, search             │                      │            │              │            │            │
+│ admin          │ writer > base │ *, write_file,             │ drop_*, read_secrets │ write_file │     deny     │  approval  │    deny    │
+│                │               │ read_secrets, read_*,      │                      │            │              │            │            │
+│                │               │ search                     │                      │            │              │            │            │
+╰────────────────┴───────────────┴────────────────────────────┴──────────────────────┴────────────┴──────────────┴────────────┴────────────╯
+default_action=deny (tools no rule matches)  deny wins over allow along the inheritance chain
+```
+
+The same answers from Python, for building the tool list you give the model and for
+deciding whether to pause before a call:
+
+```python
+sentinel.visible_tools("writer", ["read_file", "read_secrets", "shell"])  # ["read_file"]
+sentinel.needs_approval("writer", "write_file", {"path": "a"})  # "tool 'write_file' requires human approval ..."
+sentinel.needs_approval("base", "write_file", {"path": "a"})    # None: it would be denied anyway
+```
 
 **Tool visibility.** The proxy filters `tools/list` per agent, so a model never sees a tool
 it can't call. That saves tokens and gives it fewer chances to try.
@@ -403,6 +455,7 @@ an error, an unreachable approver or a timeout all block it.
 | --- | --- |
 | `cli` | `[y/N]` prompt on `/dev/tty`, so it works while stdin and stdout carry the MCP protocol. |
 | `webhook` | `POST`s the request to `hitl.webhook.url`. The receiver answers inline with `{"approved": true}` or later calls the approval API. |
+| `api` | Waits for the approval API only (your own UI calls `POST /approvals/{id}/approve`). |
 | `auto_approve` / `auto_deny` | For tests and CI. |
 
 Webhook payload:
@@ -429,10 +482,39 @@ To mount it in your own FastAPI app:
 ```python
 from mcp_rbac_gateway import create_approval_router
 app.include_router(create_approval_router(sentinel.broker, token="shared-secret"))
+# or reuse your own auth:  create_approval_router(sentinel.broker, dependencies=[Depends(current_user)])
 # GET  /approvals                 pending requests
-# POST /approvals/{id}/approve    {"approver": "alice", "comment": "ok"}
+# POST /approvals/{id}/approve    {"approver": "alice", "comment": "ok"}   409 if already decided
 # POST /approvals/{id}/deny
 ```
+
+The router **fails closed**: with neither `token` nor `dependencies` it raises
+`ValueError`, unless you pass `allow_unauthenticated=True`. `serve` and `proxy-http`
+mount `/approvals` only with a token (`hitl.webhook.token_env`) or
+`--allow-unauthenticated-approvals`, and refuse to start in `webhook`/`api` mode without
+one, because calls would wait on an API anyone could answer.
+
+#### Which mode when you mount the router
+
+| `hitl.mode` | With the router mounted by your app |
+| --- | --- |
+| `api` | Calls wait for a decision on your router. Use this when people decide in your UI. |
+| `webhook` | The same, plus a POST per request to `hitl.webhook.url` (Slack, paging). |
+| `auto_deny` | Nothing waits on the router: approvals are denied at once and the queue stays empty. Use it to switch approvals off in an environment. |
+| `cli` | Prompts on the server's terminal. Wrong for a server. |
+
+With `check_call(..., wait=False)` the mode doesn't matter: the request goes to the
+store and your code decides (see [Multi-tenant hosts](#multi-tenant-hosts)).
+
+**Durable, multi-replica approvals.** `hitl.store: sqlite` keeps pending requests in a
+table of the audit database (WAL mode). A restart loses nothing, any replica that shares
+the file can list and decide a request, and a waiting call notices the decision by
+polling the store with backoff. Decisions are atomic: of two concurrent approvals,
+exactly one wins and the other gets `409`. For Postgres or Redis, implement the
+five-method `ApprovalStore` protocol (`mcp_rbac_gateway.approvals`); a store may add a
+`wait_for_change` hook (`LISTEN/NOTIFY`, pub/sub) so waiters don't poll. Requests carry
+`tenant_id`, `session_id` and `request_id`, so `GET /approvals` can be scoped per tenant
+(`require_scope=`) and an approval links to its audit rows.
 
 Custom logic, such as Slack buttons, a ticketing system or a second model as a reviewer, is one class:
 
@@ -540,12 +622,158 @@ except ToolBlockedError as exc:
 
 - The function receives **sanitised** arguments, with secrets already redacted, and its
   return value is redacted and scanned before it reaches the caller.
-- `on_block="return"` returns a `"[mcp-rbac-gateway] …"` string instead of raising. This is
-  usually what you want inside an agent loop, because the model can read the refusal and
-  change course.
+- `on_block="result"` returns a `ToolDenial` instead of raising: `tool`, `decision`,
+  `reason`, `retryable`, `hint`, `request_id`, `approval_id`. `denial.to_text()` is safe
+  to put in a prompt: it never echoes the blocked arguments, withheld output or an
+  exception message, and it tells the model whether to retry (`retryable` is true only for
+  `approval_timeout` and tool errors). This is usually what you want inside an agent loop.
+- `on_block="return"` (0.2 behaviour) returns a `"[mcp-rbac-gateway] …"` string.
+- **Sync code.** `@guard` works on plain `def` functions, and `sentinel.call_sync(...)` /
+  `check_call_sync(...)` / `resume_call_sync(...)` are blocking forms. With no running
+  event loop they use `asyncio.run`. Inside a running loop (a sync tool called by
+  LangGraph, for example) they never call `asyncio.run`: the async part runs on a worker
+  thread with your context variables, and your function still runs in the calling thread.
+  Don't call them from a coroutine on the loop itself; that blocks the loop. Use the async
+  forms there.
+- **Request context.** `call()`, `@guard` and `check_call()` take `context=CallContext(...)`,
+  or read it from `with call_context(...)`. See [Multi-tenant hosts](#multi-tenant-hosts).
 - Lower-level building blocks: `sentinel.check_call(...)`, `sentinel.check_result(...)`,
-  `sentinel.call(tool, args, fn)`, plus `PolicyEngine`, `Scanner`, `ApprovalGate` and
+  `sentinel.record(...)`, `sentinel.call(tool, args, fn)`, `sentinel.visible_tools(...)`,
+  `sentinel.needs_approval(...)`, plus `PolicyEngine`, `Scanner`, `ApprovalGate` and
   `AuditLog`, which you can use on their own.
+
+## Multi-tenant hosts
+
+A host that serves many tenants needs every audit row and approval tagged with the
+tenant and the model's tool-call id, an audit API that can't leak across tenants,
+approvals that survive restarts and replicas, and a way to pause with its own durable
+mechanism (LangGraph `interrupt`, a Temporal signal) instead of a waiting coroutine.
+The full runnable version is [`examples/multi_tenant.py`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/examples/multi_tenant.py).
+
+```yaml
+# sentinel.yaml
+agents:
+  member: {allow: ["read_*", "search"]}
+  admin:  {inherits: [member], allow: ["delete_*"], require_approval: ["delete_*"]}
+hitl:
+  mode: api            # decisions come from your app, not a terminal
+  store: sqlite        # pending approvals live in the audit DB: restart- and replica-safe
+  timeout_seconds: 3600
+audit:
+  path: /data/gateway.db
+```
+
+**1. Tag every call with its tenant.** Bind the context once around the agent run (or
+per tool call). It is a context variable, so it follows `await` and worker threads and
+never leaks between concurrent requests. Every row the call writes (allowed, blocked,
+injection, error, approval) carries it, and `traceparent` is filled from the current
+OpenTelemetry span when OpenTelemetry is installed.
+
+```python
+from mcp_rbac_gateway import CallContext, Sentinel, ToolDenial, call_context
+
+gateway = Sentinel.from_yaml("sentinel.yaml")
+
+with call_context(tenant_id=user.tenant, session_id=thread_id, request_id=tool_call.id,
+                  labels={"plan": "pro"}):
+    out = await gateway.call(tool_call.name, tool_call.args, run_tool,
+                             agent_id=user.role, wait=False, on_block="result")
+# or explicitly: gateway.call(..., context=CallContext(tenant_id=..., request_id=...))
+```
+
+**2. Pause your own way, resume later.** With `wait=False` a call that needs approval
+returns at once (`decision == "pending_approval"`, with `approval_id`). The request is in
+the store and on the audit trail. Pause, then finish with `resume_call`, which writes the
+decision with the same tenant and request ids:
+
+```python
+from langgraph.types import interrupt
+
+if isinstance(out, ToolDenial):
+    if out.decision == "pending_approval":
+        answer = interrupt({"approval_id": out.approval_id, "tool": out.tool})  # checkpointed
+        out = await gateway.resume_call(out.approval_id, answer["approved"], run_tool)
+    else:
+        return out.to_text()          # tell the model; never echoes the blocked payload
+```
+
+A second decision on the same request raises `ApprovalConflict` (`409` on the router).
+Deciding a request that has expired writes `approval_timeout`.
+
+**3. A tenant-scoped audit API.** `create_audit_router` serves `GET /audit` with filters
+(`agent`, `tool`, `decision`, `blocked_only`, `since`, `session_id`, `request_id`,
+`tenant_id`, `trace_id`, `limit` ≤ 500) and keyset pagination (`before_id`, stable while
+rows are written). When `require_scope` returns a tenant, it is forced into the query,
+whatever the caller asks for:
+
+```python
+from fastapi import Depends
+from mcp_rbac_gateway import create_approval_router, create_audit_router
+
+def tenant_of(request) -> str:            # e.g. the tenant claim of the verified JWT
+    return request.state.user.tenant
+
+app.include_router(create_audit_router(gateway.audit, require_scope=tenant_of,
+                                       dependencies=[Depends(current_user)]))
+app.include_router(create_approval_router(gateway.broker, require_scope=tenant_of,
+                                          dependencies=[Depends(current_user)]))
+```
+
+From Python: `gateway.audit.query(tenant_id="acme", request_id="call_1")` and
+`gateway.audit.page(tenant_id="acme", limit=100, before_id=cursor)`. The `events` table is
+a **public, versioned schema** (`PRAGMA user_version`, migrated forward on open, changed
+only by adding columns), so your own SQL on it is supported too.
+
+**4. The same through the HTTP proxy.** Give `HttpProxy`, `StatelessHttpProxy` or
+`DualHttpProxy` a `context_resolver(headers, body) -> CallContext` (called once per
+request; its result goes on every row the request writes) and an
+`agent_resolver(headers) -> role` that replaces `X-Sentinel-Token` (for example a role
+claim of the caller's OAuth token). Either may be async; raising `PermissionError`
+answers `401`.
+
+```python
+def tenant_from_jwt(headers, body) -> CallContext:
+    claims = verify_jwt(headers.get("authorization", ""))   # raises PermissionError if invalid
+    return CallContext(tenant_id=claims["tenant"], session_id=claims.get("sid"))
+
+def role_from_jwt(headers) -> str | None:
+    return verify_jwt(headers.get("authorization", ""))["role"]
+
+proxy = DualHttpProxy(gateway, "http://mcp-server:8000/mcp",
+                      context_resolver=tenant_from_jwt, agent_resolver=role_from_jwt,
+                      approval_dependencies=[Depends(current_user)])
+app = proxy.build_app()
+```
+
+`DualHttpProxy` (CLI: `proxy-http --dual-era`) serves both protocol eras on one endpoint:
+a POST whose `MCP-Protocol-Version` is 2026-07-28 takes the stateless path with its header
+checks, and everything else (a 2025-era `initialize`, session requests, `GET`, `/sse`)
+takes the `HttpProxy` path.
+
+To test a proxy without sockets, pass `transport=httpx.ASGITransport(app=upstream_app)`:
+the proxy then reaches your in-process ASGI MCP server through it.
+
+## Performance
+
+Measured with [`benchmarks/overhead.py`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/benchmarks/overhead.py)
+(`python benchmarks/overhead.py`): `Sentinel.call` around a no-op async tool, 2,000
+calls per case, Python 3.13, 4 vCPU Linux cloud VM, local SSD. Times are gateway overhead
+per call in milliseconds.
+
+| case | p50 | p95 | p99 |
+| --- | --- | --- | --- |
+| allowed, audit off | 0.07 | 0.10 | 0.12 |
+| allowed, SQLite audit (`writer: sync`) | 0.62 | 0.91 | 1.54 |
+| allowed, SQLite audit (`writer: batched`) | 0.09 | 0.15 | 0.22 |
+| denied by policy, SQLite audit (`sync`) | 0.59 | 0.90 | 1.90 |
+| output scan of a 2 kB result | 0.82 | 1.19 | 1.32 |
+
+Most of the cost of an audited call is the committed SQLite write. `audit.writer: batched`
+moves it off the hot path: rows go to a bounded queue and one thread writes them in
+batches. Reads through the same `AuditLog` flush first, and `close()` flushes, but rows
+still queued when the process is killed are lost. Keep `sync` when every row must be on
+disk before the call returns. Run the script on your own hardware: disk fsync time
+dominates the `sync` numbers.
 
 ## Audit trail & dashboard
 
@@ -561,6 +789,10 @@ Every call produces one row in SQLite (WAL mode, so `report` can read while a pr
 | `approver` | who approved or denied |
 | `arguments`, `result` | after redaction; `result` only with `log_results: true` |
 | `findings`, `redactions`, `injection_score` | what the scanner found (never the secret itself) |
+| `tenant_id`, `labels`, `approval_id` | from the call's `CallContext`; `approval_id` links the `pending_approval` row to its decision |
+
+Since 0.3.0 this is a public schema, versioned with `PRAGMA user_version` and migrated
+forward on open. Columns are only ever added.
 
 ```bash
 mcp-rbac-gateway report --since 7d                 # dashboard
@@ -569,19 +801,25 @@ mcp-rbac-gateway report --watch 2                  # live refresh
 mcp-rbac-gateway report --json | jq .by_decision   # for scripts and alerts
 ```
 
-Or query it from Python with `AuditLog(path).query(blocked_only=True)` and `.summary()`.
+Or query it from Python with `AuditLog(path).query(blocked_only=True, tenant_id="acme")`,
+`.page(...)` and `.summary()`, or mount `create_audit_router` (see
+[Multi-tenant hosts](#multi-tenant-hosts)).
 
 ## CLI reference
 
 | Command | Purpose |
 | --- | --- |
 | `mcp-rbac-gateway wrap -c CFG [--agent A] [--approval-port P] -- CMD…` | stdio proxy around an MCP server process |
-| `mcp-rbac-gateway serve -c CFG --upstream-url URL [--port 8765]` | HTTP proxy (Streamable HTTP at `/mcp`, legacy SSE at `/sse`) with the approval API |
-| `mcp-rbac-gateway proxy-http -c CFG --upstream-url URL [--port 8765]` | stateless Streamable HTTP proxy for MCP 2026-07-28, with the approval API |
+| `mcp-rbac-gateway serve -c CFG --upstream-url URL [--port 8765]` | HTTP proxy (Streamable HTTP at `/mcp`, legacy SSE at `/sse`), with the approval API when it has a token |
+| `mcp-rbac-gateway proxy-http -c CFG --upstream-url URL [--dual-era]` | stateless Streamable HTTP proxy for MCP 2026-07-28; `--dual-era` also serves 2025-era clients on the same endpoint |
 | `mcp-rbac-gateway report [--db DB] [--since 24h] [--agent A] [--json] [--watch N]` | Rich dashboard |
 | `mcp-rbac-gateway validate -c CFG` | validate the config and print effective policies |
+| `mcp-rbac-gateway check-policy CFG [-t TOOL]… [-a AGENT]…` | each agent's inheritance chain and effective allow/deny/approval, plus a decision per `--tool` |
 | `mcp-rbac-gateway check TOOL 'JSON' -a AGENT` | dry-run one decision (exit code 1 if denied) |
 | `mcp-rbac-gateway init [PATH]` | write a starter config |
+
+`wrap`, `serve` and `proxy-http` take `--allow-unauthenticated-approvals` to serve
+`/approvals` without a token on purpose.
 
 In `wrap`, stdout carries the MCP protocol, so all logs and prompts go to stderr and `/dev/tty`.
 
@@ -591,6 +829,7 @@ In `wrap`, stdout carries the MCP protocol, so all logs and prompts go to stderr
 | --- | --- |
 | [`examples/langgraph_agent.py`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/examples/langgraph_agent.py) | A LangGraph `StateGraph` + `ToolNode` agent with guarded tools: a poisoned search result is withheld, customer PII is redacted, path traversal and write SQL are denied. Runs offline with a scripted model; set `ANTHROPIC_API_KEY` to use Claude. |
 | [`examples/fastapi_app.py`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/examples/fastapi_app.py) | A FastAPI service with guarded tool endpoints, the same agent behind `/agent/run`, the approval API, and `/audit/summary`. The ops agent pauses on `delete_file` and `DROP TABLE` until someone calls `/approvals/{id}/approve`. |
+| [`examples/multi_tenant.py`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/examples/multi_tenant.py) | A multi-tenant FastAPI host: `call_context`, `wait=False` with an external pause and `resume_call`, the SQLite approval store, and a tenant-scoped audit router. |
 | [`examples/sentinel.yaml`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/examples/sentinel.yaml) | The policy both examples use. |
 | [`examples/claude_desktop_config.json`](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/main/examples/claude_desktop_config.json) | Guarding an off-the-shelf MCP server in Claude Desktop. |
 
@@ -623,7 +862,8 @@ See [SECURITY.md](https://github.com/pavankalyan-Maturi/mcp-rbac-gateway/blob/ma
 
 ```bash
 pip install -e ".[dev,langgraph]"
-pytest -q          # 128 tests: unit, plus integration against mock stdio/HTTP/SSE MCP servers
+pytest -q          # unit tests, plus integration against mock stdio/HTTP/SSE MCP servers
+python benchmarks/overhead.py
 ruff check src tests examples && mypy src
 ```
 
