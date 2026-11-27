@@ -26,8 +26,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import urljoin
@@ -1297,7 +1296,6 @@ def _version() -> str:
 # =========================================================================
 
 _SKIP_PARAMS = {"self", "cls"}
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcp-rbac-gateway")
 
 
 def guard(
@@ -1405,31 +1403,15 @@ def guard(
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
             hidden, visible = split(args, kwargs)
 
-            async def run(safe: dict[str, Any]) -> Any:
+            def run(safe: dict[str, Any]) -> Any:
                 a, k = rebuild(hidden, safe)
-                return await asyncio.to_thread(fn, *a, **k)
-
-            async def main() -> Any:
-                return await sentinel.call(name, visible, run, agent_id=agent_id, context=context)
+                return fn(*a, **k)
 
             try:
-                return _run_sync(main)
+                return sentinel.call_sync(name, visible, run, agent_id=agent_id, context=context)
             except ToolBlockedError as exc:
                 return blocked(exc)
 
         return cast(F, sync_wrapper)
 
     return decorator
-
-
-def _run_sync(factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
-    """Run a coroutine from sync code, even if this thread already has a loop."""
-    import contextvars
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(factory())
-    ctx = contextvars.copy_context()
-    future: Future[Any] = _executor.submit(ctx.run, asyncio.run, factory())
-    return future.result()

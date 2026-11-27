@@ -25,6 +25,7 @@ from .models import AuditDecision, CallVerdict, Finding, PolicyAction, PolicyDec
 from .policy import PolicyEngine
 from .proxy import HttpProxy, MessageInterceptor, StatelessHttpProxy, StdioProxy, guard
 from .scanner import Scanner
+from .sync import run_sync
 
 __all__ = [
     "ApprovalBroker",
@@ -65,4 +66,5 @@ __all__ = [
     "current_call_context",
     "guard",
     "load_config",
+    "run_sync",
 ]

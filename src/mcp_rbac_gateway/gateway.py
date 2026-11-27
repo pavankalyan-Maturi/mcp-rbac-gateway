@@ -25,12 +25,13 @@ from pydantic import BaseModel, Field
 
 from .audit import AuditEvent, AuditLog
 from .config import SentinelConfig, load_config
-from .context import CallContext, current_call_context
+from .context import CallContext, call_context, current_call_context
 from .hitl import ApprovalBroker, ApprovalGate, Approver, approver_from_config
 from .mcp import RequestMeta, TaskRegistry, param_header_map
 from .models import AuditDecision, CallVerdict, Finding, PolicyAction, ScanResult
 from .policy import PolicyEngine
 from .scanner import Scanner
+from .sync import run_sync
 
 if TYPE_CHECKING:  # pragma: no cover
     from .proxy import OnBlock
@@ -319,7 +320,29 @@ class Sentinel:
 
     # ----------------------------------------------------------------- audit
 
-    async def record(
+    async def record(self, verdict: CallVerdict, **kwargs: Any) -> None:
+        """Write one audit row. Takes the keyword arguments of :meth:`build_event`.
+
+        ``session_id`` and ``request_id`` given here win over ``context``;
+        ``context`` defaults to the one bound with :func:`call_context`.
+        """
+        if self.audit is None:
+            return
+        try:
+            await self.audit.record(self.build_event(verdict, **kwargs))
+        except Exception:  # pragma: no cover - auditing must never break a call
+            logger.exception("failed to write audit event")
+
+    def record_sync(self, verdict: CallVerdict, **kwargs: Any) -> None:
+        """Blocking form of :meth:`record`, for sync code."""
+        if self.audit is None:
+            return
+        try:
+            self.audit.record_sync(self.build_event(verdict, **kwargs))
+        except Exception:  # pragma: no cover - auditing must never break a call
+            logger.exception("failed to write audit event")
+
+    def build_event(
         self,
         verdict: CallVerdict,
         *,
@@ -334,14 +357,8 @@ class Sentinel:
         is_error: bool = False,
         meta: RequestMeta | None = None,
         context: CallContext | None = None,
-    ) -> None:
-        """Write one audit row.
-
-        ``session_id`` and ``request_id`` given here win over ``context``;
-        ``context`` defaults to the one bound with :func:`call_context`.
-        """
-        if self.audit is None:
-            return
+    ) -> AuditEvent:
+        """The audit row for ``verdict``; see :meth:`record`."""
         ctx = context or current_call_context() or CallContext()
         meta = meta or RequestMeta()
         safe_meta = None
@@ -352,7 +369,7 @@ class Sentinel:
         if result_check is not None:
             findings.extend(result_check.findings)
             injection_score = result_check.injection_score
-        event = AuditEvent(
+        return AuditEvent(
             agent_id=verdict.agent_id,
             tool=verdict.tool,
             decision=decision or verdict.decision,
@@ -377,10 +394,6 @@ class Sentinel:
             tenant_id=ctx.tenant_id,
             labels=dict(ctx.labels),
         )
-        try:
-            await self.audit.record(event)
-        except Exception:  # pragma: no cover - auditing must never break a call
-            logger.exception("failed to write audit event")
 
     # ------------------------------------------------------------- pipeline
 
@@ -449,6 +462,92 @@ class Sentinel:
             context=ctx,
         )
         return check.payload  # type: ignore[no-any-return]
+
+    # ------------------------------------------------------------- sync API
+
+    def check_call_sync(
+        self,
+        agent_id: str | None,
+        tool: str,
+        arguments: Mapping[str, Any] | None = None,
+    ) -> CallVerdict:
+        """Blocking form of :meth:`check_call`. See :func:`run_sync` for loop handling."""
+        return run_sync(lambda: self.check_call(agent_id, tool, arguments))
+
+    def call_sync(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        fn: Callable[[dict[str, Any]], T],
+        *,
+        agent_id: str | None = None,
+        transport: str = "python",
+        context: CallContext | None = None,
+    ) -> T:
+        """Blocking form of :meth:`call` for a plain (sync) function.
+
+        The policy check (and any approval wait) runs through :func:`run_sync`;
+        ``fn`` itself runs in the calling thread, so thread-locals and
+        non-thread-safe clients keep working.
+        """
+        ctx = self.resolve_context(context)
+        started = time.perf_counter()
+        verdict = run_sync(lambda: self._check_in_context(agent_id, tool, arguments, ctx))
+        if not verdict.allowed:
+            self.record_sync(
+                verdict,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                transport=transport,
+                context=ctx,
+            )
+            raise ToolBlockedError(verdict, verdict.reason, verdict.decision)
+        try:
+            result = fn(verdict.arguments)
+        except Exception as exc:
+            self.record_sync(
+                verdict,
+                decision=AuditDecision.ERROR,
+                reason=f"{type(exc).__name__}: {exc}",
+                latency_ms=(time.perf_counter() - started) * 1000,
+                transport=transport,
+                is_error=True,
+                context=ctx,
+            )
+            raise
+        check = self.check_result(result)
+        latency = (time.perf_counter() - started) * 1000
+        if check.blocked:
+            self.record_sync(
+                verdict,
+                decision=AuditDecision.BLOCKED_INJECTION,
+                reason=check.reason,
+                latency_ms=latency,
+                transport=transport,
+                result_check=check,
+                context=ctx,
+            )
+            raise ToolBlockedError(
+                verdict, check.reason or "blocked", AuditDecision.BLOCKED_INJECTION
+            )
+        self.record_sync(
+            verdict,
+            latency_ms=latency,
+            transport=transport,
+            result=check.payload,
+            result_check=check,
+            context=ctx,
+        )
+        return check.payload  # type: ignore[no-any-return]
+
+    async def _check_in_context(
+        self,
+        agent_id: str | None,
+        tool: str,
+        arguments: Mapping[str, Any] | None,
+        ctx: CallContext,
+    ) -> CallVerdict:
+        with call_context(ctx):
+            return await self.check_call(agent_id, tool, arguments)
 
     def guard(
         self,
