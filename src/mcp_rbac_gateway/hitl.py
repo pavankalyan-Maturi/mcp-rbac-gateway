@@ -23,15 +23,22 @@ import json
 import os
 import sys
 import threading
-import time
-import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from fnmatch import fnmatchcase
 from typing import IO, TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+from .approvals import (
+    ApprovalRecord,
+    ApprovalRequest,
+    ApprovalResponse,
+    ApprovalStatus,
+    ApprovalStore,
+    MemoryApprovalStore,
+    SqliteApprovalStore,
+)
 from .config import HitlConfig, WebhookConfig
 from .models import AuditDecision, PolicyAction, PolicyDecision
 from .policy import as_text, compile_regex, match_any
@@ -41,6 +48,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "ApprovalBroker",
+    "ApprovalConflict",
     "ApprovalGate",
     "ApprovalOutcome",
     "ApprovalRequest",
@@ -52,24 +60,9 @@ __all__ = [
     "CallbackApprover",
     "WebhookApprover",
     "approver_from_config",
+    "store_from_config",
     "create_approval_router",
 ]
-
-
-class ApprovalRequest(BaseModel):
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    agent_id: str
-    tool: str
-    arguments: dict[str, Any] = Field(description="Redacted arguments, safe to display.")
-    reason: str
-    created_at: float = Field(default_factory=time.time)
-    timeout_seconds: float = 300.0
-
-
-class ApprovalResponse(BaseModel):
-    approved: bool
-    approver: str | None = None
-    comment: str | None = None
 
 
 class ApprovalOutcome(BaseModel):
@@ -174,36 +167,101 @@ class CLIApprover:
         return await asyncio.to_thread(self._prompt_locked, request)
 
 
-class ApprovalBroker:
-    """In-memory registry of pending approvals, resolved through the HTTP API."""
+class ApprovalConflict(RuntimeError):
+    """The approval was already decided (or expired) by someone else."""
 
-    def __init__(self) -> None:
-        self._pending: dict[str, tuple[ApprovalRequest, asyncio.Future[ApprovalResponse]]] = {}
+    def __init__(self, request_id: str, status: ApprovalStatus) -> None:
+        super().__init__(f"approval {request_id} is already {status.value}")
+        self.request_id = request_id
+        self.status = status
+
+
+class ApprovalBroker:
+    """Pending approvals that the approval API, or any other process, can decide.
+
+    Requests live in an :class:`~mcp_rbac_gateway.approvals.ApprovalStore`.
+    A waiter in this process is woken at once when this broker resolves its
+    request; otherwise it polls the store with backoff (``poll_interval`` up
+    to ``max_poll_interval`` seconds), so a decision made by another replica
+    sharing the store is picked up too.
+    """
+
+    def __init__(
+        self,
+        store: ApprovalStore | None = None,
+        *,
+        poll_interval: float = 0.05,
+        max_poll_interval: float = 1.0,
+    ) -> None:
+        self.store: ApprovalStore = store or MemoryApprovalStore()
+        self.poll_interval = poll_interval
+        self.max_poll_interval = max_poll_interval
+        self._waiters: dict[str, asyncio.Future[ApprovalResponse]] = {}
+
+    def register(self, request: ApprovalRequest) -> None:
+        """Store a pending request without waiting for it (``check_call(wait=False)``)."""
+        self.store.put(request)
 
     def submit(self, request: ApprovalRequest) -> asyncio.Future[ApprovalResponse]:
+        """Store a pending request and return a future resolved by this broker."""
         future: asyncio.Future[ApprovalResponse] = asyncio.get_running_loop().create_future()
-        self._pending[request.id] = (request, future)
-        future.add_done_callback(lambda _f: self._pending.pop(request.id, None))
+        self._waiters[request.id] = future
+        future.add_done_callback(lambda _f: self._waiters.pop(request.id, None))
+        self.store.put(request)
         return future
 
-    def discard(self, request_id: str) -> None:
-        """Forget a request (it was decided elsewhere, timed out, or was cancelled)."""
-        entry = self._pending.pop(request_id, None)
-        if entry is not None and not entry[1].done():
-            entry[1].cancel()
+    async def wait(self, request_id: str) -> ApprovalResponse:
+        """Wait until the request is decided here or elsewhere.
 
-    def pending(self) -> list[ApprovalRequest]:
-        return [req for req, _ in self._pending.values()]
+        Raises :class:`asyncio.TimeoutError` if it expires first. The caller
+        normally also wraps this in its own timeout.
+        """
+        interval = self.poll_interval
+        change_hook = getattr(self.store, "wait_for_change", None)
+        while True:
+            future = self._waiters.get(request_id)
+            if future is not None:
+                try:
+                    return await asyncio.wait_for(asyncio.shield(future), interval)
+                except asyncio.TimeoutError:
+                    pass
+            elif change_hook is not None:
+                await change_hook(request_id, interval)
+            else:
+                await asyncio.sleep(interval)
+            record = self.store.get(request_id)
+            if record is None:
+                raise ApprovalUnavailable(f"approval request {request_id} is gone")
+            if record.response is not None:
+                return record.response
+            if record.status is ApprovalStatus.EXPIRED:
+                raise asyncio.TimeoutError
+            interval = min(interval * 1.5, self.max_poll_interval)
+
+    def discard(self, request_id: str) -> None:
+        """Stop waiting here. The stored request then expires at its deadline."""
+        future = self._waiters.pop(request_id, None)
+        if future is not None and not future.done():
+            future.cancel()
+
+    def pending(self, scope: str | None = None) -> list[ApprovalRequest]:
+        return self.store.list_pending(scope)
 
     def get(self, request_id: str) -> ApprovalRequest | None:
-        entry = self._pending.get(request_id)
-        return entry[0] if entry else None
+        """The request if it is still pending."""
+        record = self.store.get(request_id)
+        return record.request if record and record.status is ApprovalStatus.PENDING else None
+
+    def record(self, request_id: str) -> ApprovalRecord | None:
+        return self.store.get(request_id)
 
     def resolve(self, request_id: str, response: ApprovalResponse) -> bool:
-        entry = self._pending.get(request_id)
-        if entry is None or entry[1].done():
+        """Decide a request. First writer wins; returns False if it was not pending."""
+        if not self.store.resolve(request_id, response):
             return False
-        entry[1].get_loop().call_soon_threadsafe(_set_result, entry[1], response)
+        future = self._waiters.get(request_id)
+        if future is not None and not future.done():
+            future.get_loop().call_soon_threadsafe(_set_result, future, response)
         return True
 
 
@@ -239,13 +297,14 @@ class WebhookApprover:
         self._client = client
 
     async def request_approval(self, request: ApprovalRequest) -> ApprovalResponse:
-        future = self.broker.submit(request)
+        self.broker.submit(request)
         try:
             if self.config.url:
                 inline = await self._notify(request)
                 if inline is not None:
+                    self.broker.resolve(request.id, inline)
                     return inline
-            return await future
+            return await self.broker.wait(request.id)
         finally:
             self.broker.discard(request.id)
 
@@ -285,75 +344,113 @@ class ApprovalDecisionBody(BaseModel):
     comment: str | None = None
 
 
-def create_approval_router(broker: ApprovalBroker, token: str | None = None) -> APIRouter:
-    """FastAPI router exposing pending approvals.
-
-    ``GET /approvals``, ``GET /approvals/{id}``, ``POST /approvals/{id}/approve``
-    and ``POST /approvals/{id}/deny``. When ``token`` is set, requests must send
-    ``Authorization: Bearer <token>``.
-    """
-    try:
-        from fastapi import APIRouter, Depends, Header, HTTPException
-    except ImportError as exc:  # pragma: no cover
-        raise ImportError(
-            "run: pip install 'mcp-rbac-gateway[server]' to use the approval API"
-        ) from exc
-
+def bearer_dependency(token: str | None, what: str) -> Callable[..., None]:
+    """A FastAPI dependency that checks ``Authorization: Bearer <token>`` (no-op if None)."""
     import hmac
+
+    from fastapi import Header, HTTPException
 
     def check_token(authorization: str | None = Header(default=None)) -> None:
         if token is None:
             return
         expected = f"Bearer {token}"
         if authorization is None or not hmac.compare_digest(authorization, expected):
-            raise HTTPException(status_code=401, detail="invalid approval token")
+            raise HTTPException(status_code=401, detail=f"invalid {what} token")
 
-    router = APIRouter(prefix="/approvals", tags=["approvals"], dependencies=[Depends(check_token)])
+    return check_token
 
-    @router.get("", response_model=list[ApprovalRequest])
-    async def list_pending() -> list[ApprovalRequest]:
-        return broker.pending()
 
-    @router.get("/{request_id}", response_model=ApprovalRequest)
-    async def get_request(request_id: str) -> ApprovalRequest:
-        req = broker.get(request_id)
-        if req is None:
-            raise HTTPException(status_code=404, detail="no such pending approval")
-        return req
+async def resolve_scope(require_scope: Callable[[Any], Any] | None, request: Any) -> str | None:
+    """Run a host's ``require_scope(request)`` hook (sync or async)."""
+    if require_scope is None:
+        return None
+    scope = require_scope(request)
+    if inspect.isawaitable(scope):
+        scope = await scope
+    return None if scope is None else str(scope)
 
-    async def _decide(
-        request_id: str, approved: bool, body: ApprovalDecisionBody | None
-    ) -> dict[str, Any]:
-        body = body or ApprovalDecisionBody()
-        ok = broker.resolve(
-            request_id,
-            ApprovalResponse(
-                approved=approved, approver=body.approver or "webhook", comment=body.comment
-            ),
+
+def require_auth(
+    token: str | None, dependencies: Sequence[Any], allow_unauthenticated: bool, what: str
+) -> None:
+    """Refuse to build a router with no auth unless that is explicitly allowed."""
+    if not token and not dependencies and not allow_unauthenticated:
+        raise ValueError(
+            f"{what}: no token and no dependencies, so anyone could call it. Pass token=, "
+            "dependencies=[Depends(...)], or allow_unauthenticated=True"
         )
-        if not ok:
-            raise HTTPException(status_code=404, detail="no such pending approval")
-        return {"id": request_id, "approved": approved}
 
-    @router.post("/{request_id}/approve")
-    async def approve(request_id: str, body: ApprovalDecisionBody | None = None) -> dict[str, Any]:
-        return await _decide(request_id, True, body)
 
-    @router.post("/{request_id}/deny")
-    async def deny(request_id: str, body: ApprovalDecisionBody | None = None) -> dict[str, Any]:
-        return await _decide(request_id, False, body)
+def create_approval_router(
+    broker: ApprovalBroker,
+    token: str | None = None,
+    *,
+    require_scope: Callable[[Any], Any] | None = None,
+    dependencies: Sequence[Any] = (),
+    allow_unauthenticated: bool = False,
+) -> APIRouter:
+    """FastAPI router exposing pending approvals.
 
+    ``GET /approvals``, ``GET /approvals/{id}``, ``POST /approvals/{id}/approve``
+    and ``POST /approvals/{id}/deny``. When ``token`` is set, requests must send
+    ``Authorization: Bearer <token>``. ``dependencies`` adds your own FastAPI
+    dependencies (e.g. ``[Depends(current_user)]``) to every route.
+
+    Fails closed: with neither ``token`` nor ``dependencies`` it raises
+    :class:`ValueError`, unless ``allow_unauthenticated=True`` says an open
+    router is intended (a test, or auth enforced in front of the app).
+
+    ``require_scope(request) -> tenant_id | None`` (sync or async) limits a
+    caller to one tenant's approvals: others are listed as absent and answer
+    ``404``. Deciding a request that was already decided or has expired
+    answers ``409``.
+    """
+    from .api import approval_routes
+
+    require_auth(token, dependencies, allow_unauthenticated, "create_approval_router")
+    router: APIRouter = approval_routes(
+        broker, token, require_scope=require_scope, dependencies=dependencies
+    )
     return router
 
 
 def approver_from_config(config: HitlConfig, broker: ApprovalBroker | None = None) -> Approver:
+    """The approver for ``hitl.mode``.
+
+    Which mode when *your* app mounts :func:`create_approval_router`
+    (rather than ``mcp-rbac-gateway serve`` doing it):
+
+    * ``api`` - calls wait for ``POST /approvals/{id}/approve|deny`` on your
+      router. Use this when people decide in your own UI.
+    * ``webhook`` - the same, plus a POST to ``hitl.webhook.url`` per request
+      (Slack, PagerDuty ...). The webhook may also answer inline.
+    * ``auto_deny`` - nothing waits on the router: every approval is denied at
+      once, so a mounted router only ever lists an empty queue. Use it to
+      switch approvals off in an environment, not with a router.
+    * ``cli`` - prompts on the gateway's terminal; wrong for a server.
+    * ``auto_approve`` - tests only.
+
+    With ``check_call(..., wait=False)`` the mode does not matter: the request
+    goes to the store and your code decides through :meth:`Sentinel.resume_call`
+    or the router.
+    """
     if config.mode == "auto_approve":
         return AutoApprover(True)
     if config.mode == "auto_deny":
         return AutoApprover(False)
     if config.mode == "webhook":
         return WebhookApprover(config.webhook, broker=broker)
+    if config.mode == "api":
+        # Wait for the approval API only: no webhook, no terminal.
+        return WebhookApprover(WebhookConfig(), broker=broker)
     return CLIApprover()
+
+
+def store_from_config(config: HitlConfig, audit_path: str) -> ApprovalStore:
+    """``hitl.store``: ``memory`` (default) or ``sqlite`` (``store_path``, else the audit file)."""
+    if config.store == "sqlite":
+        return SqliteApprovalStore(config.store_path or audit_path)
+    return MemoryApprovalStore()
 
 
 # --------------------------------------------------------------------- gate
@@ -399,9 +496,15 @@ class ApprovalGate:
         return None
 
     async def review(
-        self, agent_id: str, tool: str, display_arguments: dict[str, Any], reason: str
+        self,
+        agent_id: str,
+        tool: str,
+        display_arguments: dict[str, Any],
+        reason: str,
+        *,
+        request: ApprovalRequest | None = None,
     ) -> ApprovalOutcome:
-        request = ApprovalRequest(
+        request = request or ApprovalRequest(
             agent_id=agent_id,
             tool=tool,
             arguments=display_arguments,

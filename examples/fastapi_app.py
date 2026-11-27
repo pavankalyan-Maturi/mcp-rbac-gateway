@@ -26,6 +26,7 @@ Try it:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -81,17 +82,21 @@ def create_app(
     config_path: str | Path = HERE / "sentinel.yaml", audit_path: str | None = None
 ) -> FastAPI:
     config = load_config(config_path)
-    # Approvals are decided over HTTP: webhook mode without a URL means
+    # Approvals are decided over HTTP: "api" mode means
     # "wait for POST /approvals/{id}/approve|deny".
-    config.hitl.mode = "webhook"
-    config.hitl.webhook.url = None
+    config.hitl.mode = "api"
     if audit_path:
         config.audit.path = audit_path
     sentinel = Sentinel(config)
 
     app = FastAPI(title="mcp-rbac-gateway FastAPI example")
     app.state.sentinel = sentinel
-    app.include_router(create_approval_router(sentinel.broker))
+    # Set APPROVAL_TOKEN in any real deployment; without it this local demo
+    # serves the approval API open, which has to be asked for explicitly.
+    token = os.environ.get("APPROVAL_TOKEN")
+    app.include_router(
+        create_approval_router(sentinel.broker, token, allow_unauthenticated=token is None)
+    )
 
     @app.post("/tools/{name}")
     async def call_tool(

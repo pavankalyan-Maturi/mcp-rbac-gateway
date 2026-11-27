@@ -123,3 +123,58 @@ async def test_fastapi_agent_with_human_approval(fastapi_example) -> None:  # ty
         assert outputs[0].startswith("Refunds are issued")
         assert outputs[1] == "deleted docs/ops/keys.md"
         assert "denied_by_human" in outputs[2] and "not today" in outputs[2]
+
+
+async def test_multi_tenant_example(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_TOKEN", "audit-secret")
+    mod = load("multi_tenant")
+    app = mod.create_app(audit_path=tmp_path / "t.db")
+    acme, globex = {"x-tenant": "acme"}, {"x-tenant": "globex"}
+    auth = {"authorization": "Bearer audit-secret"}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.post(
+            "/agents/member/tools",
+            json={"id": "c1", "name": "read_doc", "arguments": {"doc": "a"}},
+            headers=acme,
+        )
+        assert r.json() == {"status": "ok", "result": "contents of a"}
+        r = await c.post(
+            "/agents/member/tools",
+            json={"id": "c2", "name": "delete_doc", "arguments": {"doc": "a"}},
+            headers=acme,
+        )
+        assert r.json()["status"] == "denied" and "Do not retry" in r.json()["message"]
+        r = await c.post(
+            "/agents/admin/tools",
+            json={"id": "c3", "name": "delete_doc", "arguments": {"doc": "b"}},
+            headers=globex,
+        )
+        assert r.json()["status"] == "paused"
+        approval_id = r.json()["approval_id"]
+
+        # A restart: a fresh gateway on the same file sees the pending request.
+        from mcp_rbac_gateway import Sentinel
+
+        other = Sentinel(app.state.gateway.config)
+        assert [p.id for p in other.broker.pending("globex")] == [approval_id]
+        assert other.broker.pending("acme") == []
+        other.close()
+
+        # Another tenant cannot decide it; the owner can, once.
+        body = {"approved": True, "approver": "gina"}
+        assert (
+            await c.post(f"/approvals/{approval_id}", json=body, headers=acme)
+        ).status_code == 404
+        r = await c.post(f"/approvals/{approval_id}", json=body, headers=globex)
+        assert r.json() == {"status": "ok", "result": "deleted b"}
+
+        # Scoped audit: each tenant sees only its own rows, whatever it asks for.
+        assert (await c.get("/audit", headers=acme)).status_code == 401
+        rows = (await c.get("/audit?tenant_id=globex", headers={**acme, **auth})).json()["events"]
+        assert {e["tenant_id"] for e in rows} == {"acme"}
+        assert [e["request_id"] for e in rows] == ["c2", "c1"]
+        rows = (await c.get("/audit", headers={**globex, **auth})).json()["events"]
+        assert [e["decision"] for e in rows] == ["approved", "pending_approval"]
+        assert rows[0]["approver"] == "gina" and rows[0]["approval_id"] == approval_id
+    app.state.gateway.close()

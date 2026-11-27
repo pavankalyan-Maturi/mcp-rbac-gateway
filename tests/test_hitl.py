@@ -156,7 +156,9 @@ async def test_webhook_async_decision_via_router() -> None:
     assert r.status_code == 200
     resp = await task
     assert resp.approved is False and resp.approver == "dave" and resp.comment == "nope"
-    assert (await api.post(f"/approvals/{rid}/approve", headers=auth)).status_code == 404
+    # Already decided: 409 since 0.3.0 (404 before).
+    assert (await api.post(f"/approvals/{rid}/approve", headers=auth)).status_code == 409
+    assert (await api.post("/approvals/nope/approve", headers=auth)).status_code == 404
 
 
 async def test_webhook_failure_is_unavailable() -> None:

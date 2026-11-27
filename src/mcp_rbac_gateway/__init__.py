@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
-from .audit import AuditEvent, AuditLog
+from .approvals import (
+    ApprovalRecord,
+    ApprovalStatus,
+    ApprovalStore,
+    MemoryApprovalStore,
+    SqliteApprovalStore,
+)
+from .audit import AuditEvent, AuditLog, AuditPage, create_audit_router
 from .config import SentinelConfig, load_config
+from .context import CallContext, call_context, current_call_context
 from .gateway import ResultCheck, Sentinel, ToolBlockedError, agent_context, current_agent
 from .hitl import (
     ApprovalBroker,
+    ApprovalConflict,
     ApprovalGate,
     ApprovalRequest,
     ApprovalResponse,
@@ -20,25 +29,49 @@ from .hitl import (
     create_approval_router,
 )
 from .mcp import RequestMeta, TaskRegistry
-from .models import AuditDecision, CallVerdict, Finding, PolicyAction, PolicyDecision, ScanResult
+from .models import (
+    AuditDecision,
+    CallVerdict,
+    Finding,
+    PolicyAction,
+    PolicyDecision,
+    ScanResult,
+    ToolDenial,
+)
 from .policy import PolicyEngine
-from .proxy import HttpProxy, MessageInterceptor, StatelessHttpProxy, StdioProxy, guard
+from .proxy import (
+    DualHttpProxy,
+    HttpProxy,
+    MessageInterceptor,
+    StatelessHttpProxy,
+    StdioProxy,
+    guard,
+)
 from .scanner import Scanner
+from .sync import run_sync
 
 __all__ = [
     "ApprovalBroker",
+    "ApprovalConflict",
     "ApprovalGate",
+    "ApprovalRecord",
     "ApprovalRequest",
     "ApprovalResponse",
+    "ApprovalStatus",
+    "ApprovalStore",
     "Approver",
     "AuditDecision",
     "AuditEvent",
     "AuditLog",
+    "AuditPage",
     "AutoApprover",
+    "CallContext",
     "CLIApprover",
     "CallVerdict",
     "CallbackApprover",
     "Finding",
+    "MemoryApprovalStore",
+    "DualHttpProxy",
     "HttpProxy",
     "MessageInterceptor",
     "PolicyAction",
@@ -50,15 +83,21 @@ __all__ = [
     "Scanner",
     "Sentinel",
     "SentinelConfig",
+    "SqliteApprovalStore",
     "StatelessHttpProxy",
     "StdioProxy",
     "TaskRegistry",
     "ToolBlockedError",
+    "ToolDenial",
     "WebhookApprover",
     "__version__",
     "agent_context",
+    "call_context",
     "create_approval_router",
+    "create_audit_router",
     "current_agent",
+    "current_call_context",
     "guard",
     "load_config",
+    "run_sync",
 ]

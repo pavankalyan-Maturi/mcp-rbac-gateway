@@ -151,4 +151,5 @@ def test_unknown_legacy_session(proxy_url: str) -> None:
 def test_healthz_and_approvals(proxy_url: str) -> None:
     with httpx.Client(base_url=proxy_url) as c:
         assert c.get("/healthz").json() == {"status": "ok"}
-        assert c.get("/approvals").json() == []
+        # 0.3.0: no approval_token, so /approvals is not mounted (it was open before).
+        assert c.get("/approvals").status_code == 404
