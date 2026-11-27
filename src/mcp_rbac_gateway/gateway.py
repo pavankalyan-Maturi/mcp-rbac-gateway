@@ -19,7 +19,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from pydantic import BaseModel, Field
 
@@ -36,7 +36,7 @@ from .hitl import (
     store_from_config,
 )
 from .mcp import RequestMeta, TaskRegistry, param_header_map
-from .models import AuditDecision, CallVerdict, Finding, PolicyAction, ScanResult
+from .models import AuditDecision, CallVerdict, Finding, PolicyAction, ScanResult, ToolDenial
 from .policy import PolicyEngine
 from .scanner import Scanner
 from .sync import run_sync
@@ -87,6 +87,16 @@ class ToolBlockedError(PermissionError):
         self.verdict = verdict
         self.reason = reason
         self.decision = decision
+
+    def denial(self, tool: str | None = None, request_id: str | None = None) -> ToolDenial:
+        """This block as a :class:`ToolDenial` for the model."""
+        return ToolDenial.build(
+            tool or (self.verdict.tool if self.verdict else "unknown"),
+            self.decision,
+            self.reason,
+            request_id=request_id,
+            approval_id=self.verdict.approval_id if self.verdict else None,
+        )
 
 
 class ResultCheck(BaseModel):
@@ -449,6 +459,34 @@ class Sentinel:
 
     # ------------------------------------------------------------- pipeline
 
+    @overload
+    async def call(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        fn: Callable[[dict[str, Any]], Awaitable[T]],
+        *,
+        agent_id: str | None = ...,
+        transport: str = ...,
+        context: CallContext | None = ...,
+        wait: bool = ...,
+        on_block: Literal["raise"] = ...,
+    ) -> T: ...
+
+    @overload
+    async def call(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        fn: Callable[[dict[str, Any]], Awaitable[T]],
+        *,
+        agent_id: str | None = ...,
+        transport: str = ...,
+        context: CallContext | None = ...,
+        wait: bool = ...,
+        on_block: Literal["result"],
+    ) -> T | ToolDenial: ...
+
     async def call(
         self,
         tool: str,
@@ -459,15 +497,42 @@ class Sentinel:
         transport: str = "python",
         context: CallContext | None = None,
         wait: bool = True,
-    ) -> T:
+        on_block: Literal["raise", "result"] = "raise",
+    ) -> T | ToolDenial:
         """Guard an arbitrary async callable end to end.
 
-        ``fn`` receives the (possibly redacted) arguments. Raises
-        :class:`ToolBlockedError` when the call or its output is blocked.
-        ``context`` (default: the one bound with :func:`call_context`) is
-        written to every audit row this call produces.
+        ``fn`` receives the (possibly redacted) arguments. ``context``
+        (default: the one bound with :func:`call_context`) is written to every
+        audit row this call produces.
+
+        ``on_block="raise"`` (default) raises :class:`ToolBlockedError` when the
+        call or its output is blocked, and re-raises errors from ``fn``.
+        ``on_block="result"`` returns a :class:`ToolDenial` instead, for both.
         """
         ctx = self.resolve_context(context)
+        try:
+            return await self._call(tool, arguments, fn, agent_id, transport, ctx, wait)
+        except ToolBlockedError as exc:
+            if on_block == "raise":
+                raise
+            return exc.denial(tool, ctx.request_id)
+        except Exception as exc:
+            if on_block == "raise":
+                raise
+            return ToolDenial.build(
+                tool, AuditDecision.ERROR, f"{type(exc).__name__}: {exc}", request_id=ctx.request_id
+            )
+
+    async def _call(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        fn: Callable[[dict[str, Any]], Awaitable[T]],
+        agent_id: str | None,
+        transport: str,
+        ctx: CallContext,
+        wait: bool,
+    ) -> T:
         started = time.perf_counter()
         verdict = await self.check_call(agent_id, tool, arguments, context=ctx, wait=wait)
         if verdict.pending:
@@ -544,6 +609,34 @@ class Sentinel:
             lambda: self.check_call(agent_id, tool, arguments, context=context, wait=wait)
         )
 
+    @overload
+    def call_sync(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        fn: Callable[[dict[str, Any]], T],
+        *,
+        agent_id: str | None = ...,
+        transport: str = ...,
+        context: CallContext | None = ...,
+        wait: bool = ...,
+        on_block: Literal["raise"] = ...,
+    ) -> T: ...
+
+    @overload
+    def call_sync(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        fn: Callable[[dict[str, Any]], T],
+        *,
+        agent_id: str | None = ...,
+        transport: str = ...,
+        context: CallContext | None = ...,
+        wait: bool = ...,
+        on_block: Literal["result"],
+    ) -> T | ToolDenial: ...
+
     def call_sync(
         self,
         tool: str,
@@ -554,7 +647,8 @@ class Sentinel:
         transport: str = "python",
         context: CallContext | None = None,
         wait: bool = True,
-    ) -> T:
+        on_block: Literal["raise", "result"] = "raise",
+    ) -> T | ToolDenial:
         """Blocking form of :meth:`call` for a plain (sync) function.
 
         The policy check (and any approval wait) runs through :func:`run_sync`;
@@ -562,6 +656,29 @@ class Sentinel:
         non-thread-safe clients keep working.
         """
         ctx = self.resolve_context(context)
+        try:
+            return self._call_sync(tool, arguments, fn, agent_id, transport, ctx, wait)
+        except ToolBlockedError as exc:
+            if on_block == "raise":
+                raise
+            return exc.denial(tool, ctx.request_id)
+        except Exception as exc:
+            if on_block == "raise":
+                raise
+            return ToolDenial.build(
+                tool, AuditDecision.ERROR, f"{type(exc).__name__}: {exc}", request_id=ctx.request_id
+            )
+
+    def _call_sync(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        fn: Callable[[dict[str, Any]], T],
+        agent_id: str | None,
+        transport: str,
+        ctx: CallContext,
+        wait: bool,
+    ) -> T:
         started = time.perf_counter()
         verdict = run_sync(
             lambda: self.check_call(agent_id, tool, arguments, context=ctx, wait=wait)

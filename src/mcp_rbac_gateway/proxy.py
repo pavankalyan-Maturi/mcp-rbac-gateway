@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import urljoin
 
-from .context import CallContext
+from .context import CallContext, current_call_context
 from .gateway import ResultCheck, Sentinel, ToolBlockedError
 from .mcp import (
     HEADER_MISMATCH,
@@ -47,7 +47,7 @@ from .mcp import (
     header_param_value,
     skill_path,
 )
-from .models import AuditDecision, CallVerdict
+from .models import AuditDecision, CallVerdict, ToolDenial
 
 if TYPE_CHECKING:  # pragma: no cover
     from fastapi import FastAPI
@@ -65,7 +65,7 @@ __all__ = [
 logger = logging.getLogger("mcp_rbac_gateway.proxy")
 
 BLOCK_PREFIX = "[mcp-rbac-gateway]"
-OnBlock = Literal["raise", "return"]
+OnBlock = Literal["raise", "return", "result"]
 F = TypeVar("F", bound=Callable[..., Any])
 
 JSON = dict[str, Any]
@@ -1327,7 +1327,9 @@ def guard(
             :func:`mcp_rbac_gateway.agent_context` is used, then ``default_agent``.
         on_block: ``"raise"`` raises :class:`ToolBlockedError`; ``"return"``
             returns a ``"[mcp-rbac-gateway] ..."`` string the LLM can read and
-            recover from, which is usually what agent frameworks want.
+            recover from; ``"result"`` returns a :class:`ToolDenial` (tool,
+            decision, reason, retryable, hint, request_id) whose ``str()`` is
+            prompt-safe, and also turns errors raised by the tool into one.
         context: Fixed :class:`CallContext` for every call. When omitted, the
             context bound with :func:`mcp_rbac_gateway.call_context` at call
             time is used.
@@ -1380,10 +1382,24 @@ def guard(
                     kwargs[extra] = value
             return args, kwargs
 
-        def blocked(exc: ToolBlockedError) -> str:
+        def blocked(exc: ToolBlockedError) -> Any:
             if on_block == "raise":
                 raise exc
+            if on_block == "result":
+                ctx = context or current_call_context()
+                return exc.denial(name, ctx.request_id if ctx else None)
             return f"{BLOCK_PREFIX} Tool '{name}' blocked ({exc.decision.value}): {exc.reason}"
+
+        def failed(exc: Exception) -> Any:
+            if on_block != "result":
+                raise exc
+            ctx = context or current_call_context()
+            return ToolDenial.build(
+                name,
+                AuditDecision.ERROR,
+                f"{type(exc).__name__}: {exc}",
+                request_id=ctx.request_id if ctx else None,
+            )
 
         if inspect.iscoroutinefunction(fn):
 
@@ -1401,6 +1417,8 @@ def guard(
                     )
                 except ToolBlockedError as exc:
                     return blocked(exc)
+                except Exception as exc:
+                    return failed(exc)
 
             return cast(F, async_wrapper)
 
@@ -1416,6 +1434,8 @@ def guard(
                 return sentinel.call_sync(name, visible, run, agent_id=agent_id, context=context)
             except ToolBlockedError as exc:
                 return blocked(exc)
+            except Exception as exc:
+                return failed(exc)
 
         return cast(F, sync_wrapper)
 

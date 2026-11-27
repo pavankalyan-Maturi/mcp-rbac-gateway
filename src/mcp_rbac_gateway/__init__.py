@@ -29,7 +29,15 @@ from .hitl import (
     create_approval_router,
 )
 from .mcp import RequestMeta, TaskRegistry
-from .models import AuditDecision, CallVerdict, Finding, PolicyAction, PolicyDecision, ScanResult
+from .models import (
+    AuditDecision,
+    CallVerdict,
+    Finding,
+    PolicyAction,
+    PolicyDecision,
+    ScanResult,
+    ToolDenial,
+)
 from .policy import PolicyEngine
 from .proxy import HttpProxy, MessageInterceptor, StatelessHttpProxy, StdioProxy, guard
 from .scanner import Scanner
@@ -72,6 +80,7 @@ __all__ = [
     "StdioProxy",
     "TaskRegistry",
     "ToolBlockedError",
+    "ToolDenial",
     "WebhookApprover",
     "__version__",
     "agent_context",
